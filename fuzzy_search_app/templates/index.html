@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+
+{% block title %}Fuzzy Product Search{% endblock %}
+
+{% block content %}
+
+<!-- ── Hero / Search bar ── -->
+<div class="text-center mb-5 mt-2">
+  <h1 class="fw-bold mb-1" style="font-size:2rem;">
+    <i class="bi bi-search text-primary me-2"></i>Product Search
+  </h1>
+  <p class="text-muted mb-4">
+    Typo-tolerant &bull; Word-order independent &bull; Partial keyword matching
+  </p>
+
+  <form method="GET" action="/search" class="search-wrapper">
+    <div class="input-group shadow-sm">
+      <input
+        type="text"
+        name="q"
+        id="searchInput"
+        class="form-control search-input"
+        placeholder="Search products, brands, categories…"
+        value="{{ query }}"
+        autocomplete="off"
+        autofocus
+      />
+      <button class="btn btn-primary search-btn" type="submit">
+        <i class="bi bi-search me-1"></i>Search
+      </button>
+    </div>
+    <input type="hidden" name="k" value="{{ top_k }}" />
+  </form>
+
+  <!-- Stats pills -->
+  <div class="mt-3 d-flex justify-content-center gap-2 flex-wrap">
+    <span class="stat-pill">
+      <i class="bi bi-box-seam me-1"></i>{{ stats.total_products }} products indexed
+    </span>
+    {% if query %}
+    <span class="stat-pill">
+      <i class="bi bi-list-check me-1"></i>{{ results|length }} results
+    </span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ── No query state ── -->
+{% if not query %}
+<div class="text-center text-muted py-5">
+  <i class="bi bi-search" style="font-size:4rem; opacity:.2;"></i>
+  <p class="mt-3">Type something above to start searching.</p>
+  <div class="mt-4 d-flex justify-content-center gap-2 flex-wrap">
+    {% for hint in ["hookah", "grinder", "marlboro", "glass pipe", "energy drink"] %}
+    <a href="/search?q={{ hint }}" class="btn btn-outline-secondary btn-sm rounded-pill">
+      {{ hint }}
+    </a>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- ── No results ── -->
+{% elif results|length == 0 %}
+<div class="text-center text-muted py-5">
+  <i class="bi bi-emoji-frown" style="font-size:4rem; opacity:.2;"></i>
+  <p class="mt-3">No products matched <strong>"{{ query }}"</strong>.</p>
+  <p class="small">Try a shorter keyword or check the spelling.</p>
+</div>
+
+<!-- ── Results grid ── -->
+{% else %}
+
+<!-- Score legend -->
+<div class="d-flex gap-3 mb-3 flex-wrap align-items-center">
+  <small class="text-muted">Match quality:</small>
+  <span class="badge badge-high rounded-pill px-3">✅ High ≥ 70</span>
+  <span class="badge badge-medium rounded-pill px-3">🔵 Good ≥ 50</span>
+  <span class="badge badge-low rounded-pill px-3">🟡 Possible ≥ 35</span>
+</div>
+
+<div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-xl-4 g-4">
+  {% for p in results %}
+  <div class="col">
+    {% set img = (p.main_image or p.image) | img_url %}
+    <div class="card product-card h-100 shadow-sm position-relative"
+         id="card-{{ p.id }}">
+
+      <!-- Select checkbox overlay -->
+      <div class="card-select-overlay">
+        <input
+          type="checkbox"
+          class="product-select-cb"
+          data-product-id="{{ p.id }}"
+          data-product-name="{{ p.name | e }}"
+          data-product-img="{{ img }}"
+          title="Add to download cart"
+          onchange="handleCardSelect(this)"
+        />
+      </div>
+
+      <!-- Product image -->
+      <a href="/product/{{ p.id }}">
+        {% if img %}
+        <img
+          src="{{ img }}"
+          alt="{{ p.name }}"
+          class="product-img"
+          onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+        />
+        <div class="product-img-placeholder" style="display:none;">
+          <i class="bi bi-image"></i>
+        </div>
+        {% else %}
+        <div class="product-img-placeholder">
+          <i class="bi bi-box-seam"></i>
+        </div>
+        {% endif %}
+      </a>
+
+      <div class="card-body d-flex flex-column">
+
+        <!-- Name -->
+        <h6 class="card-title mb-1">
+          <a href="/product/{{ p.id }}" class="text-decoration-none text-dark stretched-link-off">
+            {{ p.name }}
+          </a>
+        </h6>
+
+        <!-- Brand / Category -->
+        <div class="mb-2">
+          {% if p.brand_name %}
+          <span class="badge bg-secondary me-1">{{ p.brand_name }}</span>
+          {% endif %}
+          {% if p.category_name %}
+          <span class="badge bg-light text-dark border">{{ p.category_name }}</span>
+          {% endif %}
+        </div>
+
+        <!-- SKU -->
+        {% if p.sku %}
+        <small class="text-muted mb-2">SKU: {{ p.sku }}</small>
+        {% endif %}
+
+        <!-- Price -->
+        {% if p.sales_price %}
+        <p class="fw-bold text-success mb-1">${{ "%.2f"|format(p.sales_price) }}</p>
+        {% elif p.srp %}
+        <p class="fw-bold text-secondary mb-1">${{ "%.2f"|format(p.srp) }}</p>
+        {% endif %}
+
+        <!-- Out of stock badge -->
+        {% if p.out_of_stock %}
+        <span class="badge bg-danger mb-2">Out of Stock</span>
+        {% endif %}
+
+        <div class="mt-auto">
+          <!-- Score bar -->
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <small class="text-muted">Match</small>
+            <span class="badge badge-{{ p.score_label }} rounded-pill">
+              {{ p.score_pct }}%
+            </span>
+          </div>
+          <div class="score-bar-track">
+            <div class="score-bar-fill {{ p.score_label }}" style="width: {{ p.score_pct }}%;"></div>
+          </div>
+
+          <!-- Field scores (collapsible) -->
+          {% if p.field_scores %}
+          <details class="mt-2">
+            <summary class="text-muted" style="font-size:.75rem; cursor:pointer;">
+              Field scores
+            </summary>
+            <div class="mt-1">
+              {% for field, fscore in p.field_scores.items() %}
+              <div class="d-flex justify-content-between" style="font-size:.72rem;">
+                <span class="text-muted">{{ field.replace('_', ' ') }}</span>
+                <span>{{ fscore }}</span>
+              </div>
+              {% endfor %}
+            </div>
+          </details>
+          {% endif %}
+
+          <!-- Detail link -->
+          <a href="/product/{{ p.id }}" class="btn btn-outline-primary btn-sm w-100 mt-2">
+            <i class="bi bi-eye me-1"></i>View Details
+          </a>
+          <!-- Add to cart -->
+           <!--
+          <button
+            class="btn btn-outline-secondary btn-sm w-100 mt-1 btn-add-cart"
+            data-product-id="{{ p.id }}"
+            data-product-name="{{ p.name | e }}"
+            data-product-img="{{ (p.main_image or p.image) | img_url }}"
+            onclick="handleAddToCart(this)"
+          >
+            <i class="bi bi-download me-1"></i>Add to Cart
+          </button> -->
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  // Highlight query terms in product names
+  document.addEventListener("DOMContentLoaded", () => {
+    const query = {{ query | tojson }};
+    if (!query) return;
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    document.querySelectorAll(".card-title a").forEach(el => {
+      let html = el.textContent;
+      terms.forEach(term => {
+        const re = new RegExp(`(${term})`, "gi");
+        html = html.replace(re, '<mark class="bg-warning px-0">$1</mark>');
+      });
+      el.innerHTML = html;
+    });
+
+    // Restore checkbox state from cart
+    CartManager.refresh();
+  });
+
+  // Checkbox handler
+  function handleCardSelect(cb) {
+    const id   = parseInt(cb.dataset.productId);
+    const name = cb.dataset.productName;
+    const img  = cb.dataset.productImg;
+    const card = cb.closest(".product-card");
+
+    if (cb.checked) {
+      CartManager.add(id, name, img);
+      card?.classList.add("selected");
+      // Open cart panel if first item
+      const count = parseInt(document.getElementById("cart-count").textContent || "0");
+      if (count === 1) CartManager.toggle();
+    } else {
+      CartManager.remove(id);
+      card?.classList.remove("selected");
+    }
+  }
+
+  // "Add to Cart" button handler
+  function handleAddToCart(btn) {
+    const id   = parseInt(btn.dataset.productId);
+    const name = btn.dataset.productName;
+    const img  = btn.dataset.productImg;
+
+    if (CartManager.has(id)) {
+      CartManager.remove(id);
+      btn.innerHTML = '<i class="bi bi-download me-1"></i>Add to Cart';
+      btn.classList.remove("btn-success");
+      btn.classList.add("btn-outline-secondary");
+      // Uncheck corresponding checkbox
+      const cb = document.querySelector(`.product-select-cb[data-product-id="${id}"]`);
+      if (cb) { cb.checked = false; cb.closest(".product-card")?.classList.remove("selected"); }
+    } else {
+      CartManager.add(id, name, img);
+      btn.innerHTML = '<i class="bi bi-check me-1"></i>In Cart';
+      btn.classList.remove("btn-outline-secondary");
+      btn.classList.add("btn-success");
+      // Check corresponding checkbox
+      const cb = document.querySelector(`.product-select-cb[data-product-id="${id}"]`);
+      if (cb) { cb.checked = true; cb.closest(".product-card")?.classList.add("selected"); }
+    }
+  }
+</script>
+{% endblock %}

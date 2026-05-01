@@ -1,0 +1,318 @@
+{% extends "base.html" %}
+{% block title %}Settings — Fuzzy Search{% endblock %}
+
+{% block extra_head %}
+<style>
+  .settings-card {
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .field-label {
+    font-weight: 600;
+    font-size: .85rem;
+    color: #374151;
+    margin-bottom: .3rem;
+  }
+  .field-hint {
+    font-size: .75rem;
+    color: #9ca3af;
+    margin-top: .25rem;
+  }
+  .conn-result {
+    border-radius: .5rem;
+    padding: .75rem 1rem;
+    font-size: .875rem;
+    display: none;
+  }
+  .conn-result.success { background: #f0fdf4; border: 1px solid #86efac; color: #166534; }
+  .conn-result.error   { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
+  .conn-result.testing { background: #eff6ff; border: 1px solid #93c5fd; color: #1e40af; }
+  .save-result {
+    font-size: .85rem;
+    display: none;
+  }
+  /* Password toggle */
+  .pw-wrapper { position: relative; }
+  .pw-toggle {
+    position: absolute;
+    right: .75rem; top: 50%;
+    transform: translateY(-50%);
+    background: none; border: none;
+    color: #9ca3af; cursor: pointer;
+    padding: 0; font-size: 1rem;
+    line-height: 1;
+  }
+  .pw-toggle:hover { color: #374151; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="settings-card">
+
+  <!-- ── Header ── -->
+  <div class="mb-4">
+    <h2 class="fw-bold mb-0">
+      <i class="bi bi-gear text-primary me-2"></i>Database Settings
+    </h2>
+    <p class="text-muted mt-1">
+      Configure the MySQL connection used for syncing ERP data into SQLite.
+      Changes are saved to <code>db_settings.json</code> and take effect immediately.
+    </p>
+  </div>
+
+  <!-- ── Form card ── -->
+  <div class="card shadow-sm border-0">
+    <div class="card-body p-4">
+
+      <form id="settings-form" autocomplete="off" onsubmit="return false;">
+
+        <!-- Host -->
+        <div class="mb-3">
+          <div class="field-label">Database Host</div>
+          <input
+            type="text"
+            id="f-host"
+            class="form-control"
+            placeholder="127.0.0.1"
+            value="{{ settings.host }}"
+            spellcheck="false"
+          />
+          <div class="field-hint">IP address or hostname of the MySQL server.</div>
+        </div>
+
+        <!-- Port -->
+        <div class="mb-3">
+          <div class="field-label">Database Port</div>
+          <input
+            type="number"
+            id="f-port"
+            class="form-control"
+            placeholder="3306"
+            value="{{ settings.port }}"
+            min="1" max="65535"
+            style="max-width: 160px;"
+          />
+          <div class="field-hint">Default MySQL port is 3306.</div>
+        </div>
+
+        <!-- Database name -->
+        <div class="mb-3">
+          <div class="field-label">Database Name</div>
+          <input
+            type="text"
+            id="f-database"
+            class="form-control"
+            placeholder="cloudbbtl_novx"
+            value="{{ settings.database }}"
+            spellcheck="false"
+          />
+          <div class="field-hint">The MySQL database / schema name.</div>
+        </div>
+
+        <!-- Username -->
+        <div class="mb-3">
+          <div class="field-label">Database Username</div>
+          <input
+            type="text"
+            id="f-user"
+            class="form-control"
+            placeholder="root"
+            value="{{ settings.user }}"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+
+        <!-- Password -->
+        <div class="mb-4">
+          <div class="field-label">Database Password</div>
+          <div class="pw-wrapper">
+            <input
+              type="password"
+              id="f-password"
+              class="form-control pe-5"
+              placeholder="Leave blank to keep current password"
+              autocomplete="new-password"
+            />
+            <button type="button" class="pw-toggle" onclick="togglePassword()" id="pw-eye">
+              <i class="bi bi-eye" id="pw-eye-icon"></i>
+            </button>
+          </div>
+          <div class="field-hint">
+            Leave blank to keep the currently saved password.
+            Current password: <span id="pw-status">
+              {% if settings.password %}set (hidden){% else %}not set{% endif %}
+            </span>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="d-flex gap-2 flex-wrap">
+          <button type="button" class="btn btn-primary" onclick="saveSettings()" id="btn-save">
+            <i class="bi bi-floppy me-1"></i>Save Settings
+          </button>
+          <button type="button" class="btn btn-outline-success" onclick="testConnection()" id="btn-test">
+            <i class="bi bi-plug me-1"></i>Test Connection
+          </button>
+          <button type="button" class="btn btn-outline-secondary" onclick="resetForm()">
+            <i class="bi bi-arrow-counterclockwise me-1"></i>Reset
+          </button>
+        </div>
+
+      </form>
+
+      <!-- Save result -->
+      <div id="save-result" class="save-result mt-3"></div>
+
+    </div>
+  </div>
+
+  <!-- ── Connection test result ── -->
+  <div id="conn-result" class="conn-result mt-3">
+    <div class="d-flex align-items-start gap-2">
+      <i id="conn-icon" class="bi fs-5 mt-0"></i>
+      <div>
+        <div id="conn-message" class="fw-semibold"></div>
+        <div id="conn-detail"  class="mt-1 small"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Current saved config (read-only display) ── -->
+  <div class="card mt-4 border-0 shadow-sm">
+    <div class="card-body">
+      <h6 class="fw-bold mb-3">
+        <i class="bi bi-info-circle text-primary me-2"></i>Currently Saved Configuration
+      </h6>
+      <table class="table table-sm mb-0">
+        <tbody>
+          <tr><th class="bg-light w-40">Host</th>     <td><code>{{ settings.host }}</code></td></tr>
+          <tr><th class="bg-light">Port</th>           <td><code>{{ settings.port }}</code></td></tr>
+          <tr><th class="bg-light">Database</th>       <td><code>{{ settings.database }}</code></td></tr>
+          <tr><th class="bg-light">Username</th>       <td><code>{{ settings.user }}</code></td></tr>
+          <tr><th class="bg-light">Password</th>
+              <td>{% if settings.password %}<span class="text-muted">set (hidden)</span>{% else %}<span class="text-muted">not set</span>{% endif %}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function getFormValues() {
+    return {
+      host:     document.getElementById("f-host").value.trim(),
+      port:     document.getElementById("f-port").value.trim(),
+      database: document.getElementById("f-database").value.trim(),
+      user:     document.getElementById("f-user").value.trim(),
+      password: document.getElementById("f-password").value,   // may be blank
+    };
+  }
+
+  function togglePassword() {
+    const inp  = document.getElementById("f-password");
+    const icon = document.getElementById("pw-eye-icon");
+    if (inp.type === "password") {
+      inp.type = "text";
+      icon.className = "bi bi-eye-slash";
+    } else {
+      inp.type = "password";
+      icon.className = "bi bi-eye";
+    }
+  }
+
+  function resetForm() {
+    location.reload();
+  }
+
+  // ── Save settings ──────────────────────────────────────────────────────────
+  async function saveSettings() {
+    const btn  = document.getElementById("btn-save");
+    const orig = btn.innerHTML;
+    btn.disabled  = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Saving…';
+
+    const resultEl = document.getElementById("save-result");
+    resultEl.style.display = "none";
+
+    try {
+      const resp = await fetch("/api/settings", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(getFormValues()),
+      });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        resultEl.innerHTML = `<span class="text-success"><i class="bi bi-check-circle me-1"></i>${data.message}</span>`;
+        // Reload page to refresh the "Currently Saved" table
+        setTimeout(() => location.reload(), 800);
+      } else {
+        resultEl.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${data.error || "Save failed"}</span>`;
+      }
+    } catch (e) {
+      resultEl.innerHTML = `<span class="text-danger"><i class="bi bi-x-circle me-1"></i>${e.message}</span>`;
+    } finally {
+      resultEl.style.display = "block";
+      btn.innerHTML = orig;
+      btn.disabled  = false;
+    }
+  }
+
+  // ── Test connection ────────────────────────────────────────────────────────
+  async function testConnection() {
+    const btn  = document.getElementById("btn-test");
+    const orig = btn.innerHTML;
+    btn.disabled  = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Testing…';
+
+    const box     = document.getElementById("conn-result");
+    const icon    = document.getElementById("conn-icon");
+    const message = document.getElementById("conn-message");
+    const detail  = document.getElementById("conn-detail");
+
+    // Show "testing" state
+    box.className = "conn-result testing";
+    box.style.display = "block";
+    icon.className    = "bi bi-hourglass-split fs-5 mt-0";
+    message.textContent = "Testing connection…";
+    detail.textContent  = "";
+
+    try {
+      const resp = await fetch("/api/settings/test", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(getFormValues()),
+      });
+      const data = await resp.json();
+
+      if (data.ok) {
+        box.className     = "conn-result success";
+        icon.className    = "bi bi-check-circle-fill fs-5 mt-0";
+        message.textContent = data.message;
+        detail.textContent  = data.detail;
+      } else {
+        box.className     = "conn-result error";
+        icon.className    = "bi bi-x-circle-fill fs-5 mt-0";
+        message.textContent = data.message;
+        detail.textContent  = data.detail;
+      }
+    } catch (e) {
+      box.className     = "conn-result error";
+      icon.className    = "bi bi-x-circle-fill fs-5 mt-0";
+      message.textContent = "Request failed";
+      detail.textContent  = e.message;
+    } finally {
+      btn.innerHTML = orig;
+      btn.disabled  = false;
+    }
+  }
+</script>
+{% endblock %}

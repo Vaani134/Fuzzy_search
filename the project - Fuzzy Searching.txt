@@ -1,0 +1,930 @@
+the project - Fuzzy Searching
+
+made up of 3 modules
+1) ERP data should fetch and instert from MySQL to SQLite
+
+
+2) - generate the vectores - semantic searching
+
+   -2 ways for generating the embeddings 1st - manual way and 2nd fixed intervals
+
+   - aplly 3 algorithms - Token_set_ratio : Weight- 0.5 - sort both strings alphabetically by word then compares. this makes word order irrelavnt
+			- WRatio : weight - 0.3 - a smart combination of multiple algorithms that handles types and charecters level difference
+			- partial_ratio : weight - 0.2 - Checks if the query appears as a substring inside the product name
+
+
+
+3)Actuial searching  where the  emeddings loaded from the cache andactual working of the project
+
+Tech Stack-
+data - from MySQL to SQLite
+backend - python flask
+
+Tables 
+- product
+- brand
+- catyegory
+- transaction
+- transaction_sell_line
+- product_group
+
+
+----------------------------------------------------------------3 Algorithm Logic and code-------------------------------------------
+
+
+
+---
+
+## Install
+
+```bash
+pip install rapidfuzz
+```
+
+That's the only dependency for fuzzy search. No model download, no GPU, no internet needed.
+
+---
+
+## The Three Algorithms — What They Do & When to Use Each
+
+### Algorithm 1: `token_set_ratio` — handles word order & partial overlap
+
+```python
+from rapidfuzz import fuzz
+
+# Sorts both strings by word alphabetically, then compares
+# Makes word ORDER irrelevant
+
+print(fuzz.token_set_ratio("4 part grinder", "GRINDER 4 PART"))  # → 100
+print(fuzz.token_set_ratio("red apple juice", "apple juice red")) # → 100
+print(fuzz.token_set_ratio("hookah small", "small china hookah")) # → 100
+
+# Also handles subset matching — if query is a subset of product name:
+print(fuzz.token_set_ratio("hookah", "china hookah small"))       # → 100
+print(fuzz.token_set_ratio("glass pipe", "10 inch glass pipe beaker")) # → 100
+```
+
+**Use when:** product names have inconsistent word order, or user types partial names.
+
+---
+
+### Algorithm 2: `WRatio` — handles typos & character-level errors
+
+```python
+from rapidfuzz import fuzz
+
+# Smart combination internally — best for typo tolerance
+print(fuzz.WRatio("hooka", "hookah"))        # → 91  (missing h)
+print(fuzz.WRatio("grider", "grinder"))      # → 91  (missing n)
+print(fuzz.WRatio("juul", "JUUL"))           # → 100 (case insensitive)
+print(fuzz.WRatio("marlbro", "marlboro"))    # → 92  (transposition)
+print(fuzz.WRatio("cigartte", "cigarette"))  # → 94  (missing e)
+```
+
+**Use when:** users make spelling mistakes (which they always do).
+
+---
+
+### Algorithm 3: `partial_ratio` — catches short query inside long string
+
+```python
+from rapidfuzz import fuzz
+
+# Finds the best matching substring window
+print(fuzz.partial_ratio("glass", "10 INCH AQUA CLEAR GLASS BEAKER 9MM")) # → 100
+print(fuzz.partial_ratio("energy", "5 HOUR EXTRA ENERGY BERRY BOX"))       # → 100
+print(fuzz.partial_ratio("blue", "ACID KRUSH BLUE TINS UNIT OF 5"))        # → 100
+print(fuzz.partial_ratio("usb", "USB-C FAST CHARGER 65W"))                 # → 100
+```
+
+**Use when:** users type one keyword from a long product name.
+
+---
+
+## Complete Standalone Fuzzy Search Class
+
+Copy this entire block into any project:
+
+```python
+"""
+fuzzy_search.py
+---------------
+Self-contained fuzzy search using the 3-algorithm blend.
+No external dependencies except: pip install rapidfuzz
+
+Usage:
+    from fuzzy_search import FuzzySearchEngine
+    
+    engine = FuzzySearchEngine(products)
+    results = engine.search("hooka grider", top_k=10)
+"""
+
+from rapidfuzz import fuzz, process
+import re
+from typing import List, Dict, Any
+
+
+# ── Text normalizer ────────────────────────────────────────────────────────────
+
+def normalize(text: str) -> str:
+    """
+    Clean text for matching:
+    - lowercase
+    - remove prices like $20.00
+    - remove content in brackets like (9MM) or [BOX]
+    - remove special characters
+    - collapse whitespace
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = re.sub(r'\$\s*\d+\.?\d*', ' ', text)       # remove prices
+    text = re.sub(r'[\[\(\{].*?[\]\)\}]', ' ', text)  # remove brackets
+    text = re.sub(r'[^a-z0-9\s]', ' ', text)          # keep only alphanum
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+# ── Core scoring function ──────────────────────────────────────────────────────
+
+def blend_score(query: str, normalized_text: str, raw_text: str) -> float:
+    """
+    Three-algorithm blend scored against both normalized and raw text.
+    Takes the best of the two.
+
+    Weights:
+        token_set_ratio  0.5  — word order, partial overlap
+        WRatio           0.3  — typo tolerance
+        partial_ratio    0.2  — short query inside long string
+    """
+    # Score against normalized text
+    ts_n = fuzz.token_set_ratio(query, normalized_text)
+    wr_n = fuzz.WRatio(query, normalized_text)
+    pr_n = fuzz.partial_ratio(query, normalized_text)
+    score_normalized = 0.5 * ts_n + 0.3 * wr_n + 0.2 * pr_n
+
+    # Score against raw text (preserves numbers, original casing)
+    ts_r = fuzz.token_set_ratio(query, raw_text)
+    wr_r = fuzz.WRatio(query, raw_text)
+    pr_r = fuzz.partial_ratio(query, raw_text)
+    score_raw = 0.5 * ts_r + 0.3 * wr_r + 0.2 * pr_r
+
+    return max(score_normalized, score_raw)
+
+
+# ── Main engine ────────────────────────────────────────────────────────────────
+
+class FuzzySearchEngine:
+    """
+    Fuzzy search engine using a 3-algorithm blend.
+
+    Parameters
+    ----------
+    items : list of dict
+        Each dict must have at least one text field.
+        Example: [{"id": 1, "name": "Hookah Small", "brand": "China", "category": "Hookahs"}]
+
+    text_fields : list of str
+        Fields to combine into the searchable text.
+        Default: ["name", "brand", "category"]
+
+    min_score : float
+        Minimum score (0-100) to include in results. Default: 35.
+    """
+
+    def __init__(
+        self,
+        items: List[Dict[str, Any]],
+        text_fields: List[str] = None,
+        min_score: float = 35.0,
+    ):
+        self.items = items
+        self.text_fields = text_fields or ["name", "brand", "category"]
+        self.min_score = min_score
+        self._build_index()
+
+    def _build_index(self):
+        """Pre-compute raw and normalized searchable strings for every item."""
+        self.raw_strings = []
+        self.normalized_strings = []
+
+        for item in self.items:
+            # Combine all text fields into one string
+            parts = [str(item.get(f, '')) for f in self.text_fields]
+            raw = ' '.join(p for p in parts if p and p.lower() not in ('nan', 'none', ''))
+            self.raw_strings.append(raw)
+            self.normalized_strings.append(normalize(raw))
+
+    def search(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        """
+        Search for items matching the query.
+
+        Returns list of dicts, each original item enriched with:
+            score       — final blend score (0-100)
+            score_pct   — same as score (for display as %)
+        Sorted by score descending.
+        """
+        query = normalize(query)
+        if not query:
+            return []
+
+        # ── Pass 1: Fast WRatio scan to get top candidates ────────────────────
+        # Fetch 2x top_k so the re-scoring pass has enough to work with
+        fast_matches = process.extract(
+            query,
+            self.normalized_strings,
+            scorer=fuzz.WRatio,
+            limit=top_k * 2,
+        )
+
+        # ── Pass 2: Re-score with full 3-way blend ────────────────────────────
+        results = []
+        seen = set()
+
+        for _text, _fast_score, index in fast_matches:
+            if index in seen:
+                continue
+            seen.add(index)
+
+            score = blend_score(
+                query,
+                self.normalized_strings[index],
+                self.raw_strings[index],
+            )
+
+            if score < self.min_score:
+                continue
+
+            result = dict(self.items[index])   # copy original item
+            result['score'] = round(score, 2)
+            result['score_pct'] = round(score, 2)
+            results.append(result)
+
+        # Sort by score descending, return top_k
+        results.sort(key=lambda x: x['score'], reverse=True)
+        return results[:top_k]
+
+    def search_with_field_scores(self, query: str, top_k: int = 20) -> List[Dict[str, Any]]:
+        """
+        Same as search() but also returns per-field scores.
+        Useful for bucketing results into High / Medium / Low priority.
+        """
+        results = self.search(query, top_k)
+        query_n = normalize(query)
+
+        for r in results:
+            r['field_scores'] = {
+                field: blend_score(
+                    query_n,
+                    normalize(str(r.get(field, ''))),
+                    str(r.get(field, '')).lower(),
+                )
+                for field in self.text_fields
+            }
+
+        return results
+```
+
+---
+
+## Usage Examples
+
+```python
+# ── Example 1: Basic product search ──────────────────────────────────────────
+
+products = [
+    {"id": 1, "name": "China Hookah Small",        "brand": "",        "category": "Hookahs"},
+    {"id": 2, "name": "Gold Color Grinder 4 Part", "brand": "DnK",     "category": "Grinders"},
+    {"id": 3, "name": "10 Inch Glass Beaker 9MM",  "brand": "",        "category": "Glass Pipes"},
+    {"id": 4, "name": "5 Hour Energy Berry Box",   "brand": "5 Hour",  "category": "Energy Drinks"},
+    {"id": 5, "name": "Marlboro Red 20s",           "brand": "Marlboro","category": "Cigarettes"},
+    {"id": 6, "name": "JUUL Pod Virginia 5%",       "brand": "JUUL",    "category": "Vape"},
+]
+
+engine = FuzzySearchEngine(products)
+
+# Exact match
+print(engine.search("hookah"))
+# → [{"id":1, "name":"China Hookah Small", "score":100.0, ...}]
+
+# Typo
+print(engine.search("hooka"))
+# → [{"id":1, "name":"China Hookah Small", "score":~88.0, ...}]
+
+# Wrong word order
+print(engine.search("4 part grinder gold"))
+# → [{"id":2, "name":"Gold Color Grinder 4 Part", "score":100.0, ...}]
+
+# Partial keyword
+print(engine.search("glass"))
+# → [{"id":3, "name":"10 Inch Glass Beaker 9MM", "score":~85.0, ...}]
+
+# Brand search
+print(engine.search("marlboro"))
+# → [{"id":5, "name":"Marlboro Red 20s", "score":100.0, ...}]
+```
+
+```python
+# ── Example 2: With field scores for bucketing ────────────────────────────────
+
+results = engine.search_with_field_scores("grinder", top_k=5)
+for r in results:
+    print(f"{r['name']:30} score={r['score']} fields={r['field_scores']}")
+
+# Output:
+# Gold Color Grinder 4 Part      score=95.0  fields={'name':95, 'brand':30, 'category':45}
+```
+
+```python
+# ── Example 3: Bucket into High / Medium / Low ────────────────────────────────
+
+def bucket(results, high=70, medium=50, low=35):
+    buckets = {"high": [], "medium": [], "low": []}
+    for r in results:
+        max_field = max(r.get('field_scores', {}).values(), default=0)
+        if   max_field >= high:   buckets["high"].append(r)
+        elif max_field >= medium: buckets["medium"].append(r)
+        elif max_field >= low:    buckets["low"].append(r)
+    return buckets
+
+results = engine.search_with_field_scores("energy drink", top_k=10)
+grouped = bucket(results)
+print("HIGH:",   [r['name'] for r in grouped['high']])
+print("MEDIUM:", [r['name'] for r in grouped['medium']])
+print("LOW:",    [r['name'] for r in grouped['low']])
+```
+
+```python
+# ── Example 4: Works with any data — not just products ────────────────────────
+
+# Employee search
+employees = [
+    {"id": 1, "name": "John Smith",    "department": "Engineering", "role": "Backend Developer"},
+    {"id": 2, "name": "Jane Doe",      "department": "Marketing",   "role": "Content Writer"},
+    {"id": 3, "name": "Bob Johnson",   "department": "Engineering", "role": "Frontend Developer"},
+]
+
+emp_engine = FuzzySearchEngine(employees, text_fields=["name", "department", "role"])
+print(emp_engine.search("backend eng"))
+# → [{"id":1, "name":"John Smith", "role":"Backend Developer", "score":~90}]
+
+print(emp_engine.search("jon smth"))   # typo in name
+# → [{"id":1, "name":"John Smith", "score":~88}]
+```
+
+---
+
+## Score Interpretation
+
+| Score | Meaning | Show to user as |
+|---|---|---|
+| 90–100 | Near-perfect match | ✅ High Match (green) |
+| 70–89 | Strong match | ✅ High Match (green) |
+| 50–69 | Good match | 🔵 Good Match (blue) |
+| 35–49 | Possible match | 🟡 Possible Match (yellow) |
+| < 35 | Irrelevant | ❌ Discard |
+
+---
+
+## Key Points for Your Other Project
+
+1. **No model download needed** — RapidFuzz is pure Python, works offline
+2. **No pre-computation** — scores are calculated at query time, no index to build
+3. **`_build_index()`** just pre-computes the normalized strings once at startup — O(n) time
+4. **Each search query** runs in O(n) time against all items — fast enough for up to ~50,000 items
+5. **The two-pass approach** (fast WRatio scan → full blend re-score) is the performance optimization — skip it if you have < 5,000 items and just run the full blend directly
+6. **`text_fields`** is configurable — point it at whatever fields make sense for your data
+
+-----------------------------------------------Reference Schema---------------------------
+
+-- phpMyAdmin SQL Dump
+-- version 5.2.1
+-- https://www.phpmyadmin.net/
+--
+-- Host: 127.0.0.1
+-- Generation Time: Apr 27, 2026 at 01:40 PM
+-- Server version: 10.4.32-MariaDB
+-- PHP Version: 8.2.12
+
+SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
+START TRANSACTION;
+SET time_zone = "+00:00";
+
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!40101 SET NAMES utf8mb4 */;
+
+--
+-- Database: `cloudbbtl_novx`
+--
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `brands`
+--
+
+CREATE TABLE `brands` (
+  `id` int(10) UNSIGNED NOT NULL,
+  `business_id` int(10) UNSIGNED NOT NULL,
+  `name` varchar(191) NOT NULL,
+  `description` text DEFAULT NULL,
+  `woocommerce_brand_id` bigint(20) DEFAULT NULL,
+  `created_by` int(10) UNSIGNED NOT NULL,
+  `deleted_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `categories`
+--
+
+CREATE TABLE `categories` (
+  `id` int(10) UNSIGNED NOT NULL,
+  `name` varchar(191) NOT NULL,
+  `business_id` int(10) UNSIGNED NOT NULL,
+  `short_code` varchar(191) DEFAULT NULL,
+  `parent_id` int(11) NOT NULL,
+  `created_by` int(10) UNSIGNED NOT NULL,
+  `woocommerce_cat_id` int(11) DEFAULT NULL,
+  `category_type` varchar(191) DEFAULT NULL,
+  `description` text DEFAULT NULL,
+  `slug` varchar(191) DEFAULT NULL,
+  `jadoo_cat_id` int(11) DEFAULT NULL,
+  `deleted_at` timestamp NULL DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `products`
+--
+
+CREATE TABLE `products` (
+  `id` int(10) UNSIGNED NOT NULL,
+  `name` varchar(255) NOT NULL,
+  `item_code` varchar(255) DEFAULT NULL,
+  `business_id` int(10) UNSIGNED NOT NULL,
+  `type` enum('single','variable','modifier','combo') DEFAULT NULL,
+  `unit_id` int(11) UNSIGNED DEFAULT NULL,
+  `sub_unit_ids` text DEFAULT NULL,
+  `brand_id` int(10) UNSIGNED DEFAULT NULL,
+  `category_id` int(10) UNSIGNED DEFAULT NULL,
+  `sub_category_id` int(10) UNSIGNED DEFAULT NULL,
+  `tax` int(10) UNSIGNED DEFAULT NULL,
+  `tax_type` enum('inclusive','exclusive') NOT NULL,
+  `enable_stock` tinyint(1) NOT NULL DEFAULT 0,
+  `enable_vendor` tinyint(4) NOT NULL DEFAULT 0,
+  `alert_quantity` decimal(22,4) DEFAULT NULL,
+  `sku` varchar(191) NOT NULL,
+  `sku2` varchar(191) NOT NULL,
+  `sku3` varchar(191) NOT NULL,
+  `barcode_type` enum('C39','C128','EAN13','EAN8','UPCA','UPCE') DEFAULT 'C128',
+  `expiry_period` decimal(4,2) DEFAULT NULL,
+  `expiry_period_type` enum('days','months') DEFAULT NULL,
+  `enable_sr_no` tinyint(1) NOT NULL DEFAULT 0,
+  `weight` varchar(191) DEFAULT NULL,
+  `product_custom_field1` varchar(191) DEFAULT NULL,
+  `product_custom_field2` varchar(191) DEFAULT NULL,
+  `product_custom_field3` varchar(191) DEFAULT NULL,
+  `product_custom_field4` varchar(191) DEFAULT NULL,
+  `image` varchar(191) DEFAULT NULL,
+  `woocommerce_media_id` int(11) DEFAULT NULL,
+  `main_image` varchar(255) DEFAULT NULL,
+  `product_description` text DEFAULT NULL,
+  `created_by` int(10) UNSIGNED NOT NULL,
+  `woocommerce_product_id` int(11) DEFAULT NULL,
+  `woocommerce_disable_sync` tinyint(1) NOT NULL DEFAULT 0,
+  `warranty_id` int(11) DEFAULT NULL,
+  `is_inactive` tinyint(1) NOT NULL DEFAULT 0,
+  `not_for_selling` tinyint(1) NOT NULL DEFAULT 0,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  `synced_at` timestamp NULL DEFAULT NULL,
+  `web_error_code` text DEFAULT NULL,
+  `sync` int(10) DEFAULT NULL,
+  `qty_box` varchar(191) DEFAULT NULL,
+  `case_qty` varchar(191) DEFAULT NULL,
+  `aisle` int(11) DEFAULT 0,
+  `rack` int(11) DEFAULT 0,
+  `shelf` int(11) DEFAULT 0,
+  `bin` int(11) DEFAULT 0,
+  `srp` decimal(10,2) DEFAULT NULL,
+  `sales_price` decimal(10,2) DEFAULT NULL,
+  `sync_ecom` varchar(191) DEFAULT NULL,
+  `supplier_id` text DEFAULT NULL,
+  `out_of_stock` tinyint(1) NOT NULL DEFAULT 0,
+  `note` text DEFAULT NULL,
+  `is_qty_updated` int(11) NOT NULL DEFAULT 0,
+  `limited_qty` int(1) DEFAULT 0,
+  `private_product` int(1) DEFAULT 0,
+  `ml` decimal(8,2) NOT NULL DEFAULT 0.00,
+  `master_case_qty` decimal(22,2) DEFAULT NULL,
+  `sell_limit` varchar(255) DEFAULT NULL,
+  `tier1_limit` varchar(255) DEFAULT NULL,
+  `tier2_limit` varchar(255) DEFAULT NULL,
+  `tier3_limit` varchar(255) DEFAULT NULL,
+  `fix_discount` varchar(191) DEFAULT NULL,
+  `per_discount` varchar(191) DEFAULT NULL,
+  `reconciled_at` datetime DEFAULT NULL,
+  `push_inv_month` int(4) DEFAULT NULL,
+  `push_inv_count` int(5) DEFAULT NULL,
+  `push_inv_amount` decimal(10,2) DEFAULT NULL,
+  `push_customer_state` varchar(255) DEFAULT NULL,
+  `push_quantity` int(5) DEFAULT NULL,
+  `product_group_id` int(11) DEFAULT NULL,
+  `group_variation_name` varchar(191) DEFAULT NULL,
+  `bulk_id` varchar(191) DEFAULT NULL,
+  `stock_relay` tinyint(4) DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `product_group`
+--
+
+CREATE TABLE `product_group` (
+  `id` bigint(20) UNSIGNED NOT NULL,
+  `name` varchar(191) DEFAULT NULL,
+  `created_by` int(10) UNSIGNED DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `transactions`
+--
+
+CREATE TABLE `transactions` (
+  `id` int(10) UNSIGNED NOT NULL,
+  `business_id` int(10) UNSIGNED NOT NULL,
+  `location_id` int(10) UNSIGNED DEFAULT NULL,
+  `priority_order` tinyint(2) DEFAULT NULL,
+  `res_table_id` int(10) UNSIGNED DEFAULT NULL COMMENT 'fields to restaurant module',
+  `res_waiter_id` int(10) UNSIGNED DEFAULT NULL COMMENT 'fields to restaurant module',
+  `res_order_status` enum('received','cooked','served') DEFAULT NULL,
+  `type` varchar(191) DEFAULT NULL,
+  `sub_type` varchar(20) DEFAULT NULL,
+  `status` varchar(191) NOT NULL,
+  `is_quotation` tinyint(1) NOT NULL DEFAULT 0,
+  `payment_status` enum('paid','due','partial') DEFAULT NULL,
+  `adjustment_type` enum('normal','abnormal') DEFAULT NULL,
+  `contact_id` int(11) UNSIGNED DEFAULT NULL,
+  `customer_group_id` int(11) DEFAULT NULL COMMENT 'used to add customer group while selling',
+  `invoice_no` varchar(191) DEFAULT NULL,
+  `ref_no` varchar(191) DEFAULT NULL,
+  `subscription_no` varchar(191) DEFAULT NULL,
+  `subscription_repeat_on` varchar(191) DEFAULT NULL,
+  `is_consignment` tinyint(1) DEFAULT NULL,
+  `returnable_days` int(11) DEFAULT NULL,
+  `return_date` datetime DEFAULT NULL,
+  `transaction_date` datetime NOT NULL,
+  `received_date` datetime DEFAULT NULL,
+  `total_before_tax` decimal(22,4) NOT NULL DEFAULT 0.0000 COMMENT 'Total before the purchase/invoice tax, this includeds the indivisual product tax',
+  `tax_id` int(10) UNSIGNED DEFAULT NULL,
+  `tax_amount` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `tax_flag` enum('0','1') DEFAULT NULL,
+  `discount_type` enum('fixed','percentage') DEFAULT NULL,
+  `discount_amount` decimal(22,4) DEFAULT 0.0000,
+  `rp_redeemed` int(11) NOT NULL DEFAULT 0 COMMENT 'rp is the short form of reward points',
+  `rp_redeemed_amount` decimal(22,4) NOT NULL DEFAULT 0.0000 COMMENT 'rp is the short form of reward points',
+  `shipping_details` varchar(191) DEFAULT NULL,
+  `shipping_address` text DEFAULT NULL,
+  `shipping_status` varchar(191) DEFAULT NULL,
+  `delivered_to` varchar(191) DEFAULT NULL,
+  `shipping_charges` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `previous_shipping_charges` decimal(22,4) DEFAULT 0.0000,
+  `additional_notes` text DEFAULT NULL,
+  `shipping_date` date DEFAULT NULL,
+  `shipping_carier` varchar(255) DEFAULT NULL,
+  `tracking_id` varchar(255) DEFAULT NULL,
+  `additional_shipping_charges` decimal(22,4) DEFAULT NULL,
+  `eta` date DEFAULT NULL,
+  `staff_note` text DEFAULT NULL,
+  `round_off_amount` decimal(22,4) NOT NULL DEFAULT 0.0000 COMMENT 'Difference of rounded total and actual total',
+  `item_qty` int(11) DEFAULT NULL,
+  `final_total` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `bf_final_total` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `expense_category_id` int(10) UNSIGNED DEFAULT NULL,
+  `expense_for` int(10) UNSIGNED DEFAULT NULL,
+  `commission_agent` int(11) DEFAULT NULL,
+  `document` varchar(191) DEFAULT NULL,
+  `extra_document` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`extra_document`)),
+  `is_direct_sale` tinyint(1) NOT NULL DEFAULT 0,
+  `is_suspend` tinyint(1) NOT NULL DEFAULT 0,
+  `exchange_rate` decimal(20,3) NOT NULL DEFAULT 1.000,
+  `total_amount_recovered` decimal(22,4) DEFAULT NULL COMMENT 'Used for stock adjustment.',
+  `transfer_parent_id` int(11) DEFAULT NULL,
+  `return_parent_id` int(11) DEFAULT NULL,
+  `opening_stock_product_id` int(11) DEFAULT NULL,
+  `picked_by` int(11) DEFAULT NULL,
+  `packed_by` int(11) NOT NULL,
+  `created_by` int(10) UNSIGNED NOT NULL,
+  `woocommerce_order_id` int(11) DEFAULT NULL,
+  `import_batch` int(11) DEFAULT NULL,
+  `import_time` datetime DEFAULT NULL,
+  `types_of_service_id` int(11) DEFAULT NULL,
+  `packing_charge` decimal(22,4) DEFAULT NULL,
+  `packing_charge_type` enum('fixed','percent') DEFAULT NULL,
+  `service_custom_field_1` text DEFAULT NULL,
+  `service_custom_field_2` text DEFAULT NULL,
+  `service_custom_field_3` text DEFAULT NULL,
+  `service_custom_field_4` text DEFAULT NULL,
+  `is_created_from_api` tinyint(1) NOT NULL DEFAULT 0,
+  `rp_earned` int(11) NOT NULL DEFAULT 0 COMMENT 'rp is the short form of reward points',
+  `order_addresses` text DEFAULT NULL,
+  `is_recurring` tinyint(1) NOT NULL DEFAULT 0,
+  `recur_interval` double(22,4) DEFAULT NULL,
+  `recur_interval_type` enum('days','months','years') DEFAULT NULL,
+  `recur_repetitions` int(11) DEFAULT NULL,
+  `recur_stopped_on` datetime DEFAULT NULL,
+  `recur_parent_id` int(11) DEFAULT NULL,
+  `invoice_token` varchar(191) DEFAULT NULL,
+  `pay_term_number` int(11) DEFAULT NULL,
+  `pay_term_type` enum('days','months') DEFAULT NULL,
+  `selling_price_group_id` int(11) DEFAULT NULL,
+  `order_picking_time` text DEFAULT NULL,
+  `order_picking_status` tinyint(2) NOT NULL DEFAULT 0,
+  `order_packing_status` tinyint(2) DEFAULT 0,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL,
+  `attribute` enum('veryfi_api') DEFAULT NULL,
+  `gar_box_return_qty` int(11) DEFAULT NULL,
+  `gar_piece_return_qty` int(11) DEFAULT NULL,
+  `inv_return` int(11) DEFAULT NULL,
+  `total_qty` int(11) DEFAULT NULL,
+  `gar_q` int(11) DEFAULT NULL,
+  `vendor_return_qty` int(11) DEFAULT NULL,
+  `box_price` decimal(22,4) DEFAULT NULL,
+  `piece_price` decimal(22,4) DEFAULT NULL,
+  `rule_tax_amount` double DEFAULT NULL,
+  `sub_total` decimal(22,4) DEFAULT NULL,
+  `delivery_method` varchar(50) DEFAULT NULL,
+  `box_qty` int(10) DEFAULT 0,
+  `additional_notes_display` tinyint(1) NOT NULL DEFAULT 0,
+  `purchase_return_status` varchar(191) DEFAULT NULL,
+  `purchase_return_status_note` longtext DEFAULT NULL,
+  `split_by_zone` int(1) DEFAULT NULL,
+  `selected_zones` text DEFAULT NULL,
+  `split_status` varchar(255) DEFAULT NULL,
+  `zone_id` int(20) DEFAULT NULL,
+  `split_master_id` int(20) DEFAULT NULL,
+  `ref_contact_id` bigint(20) DEFAULT NULL,
+  `dist_shipping_charges` varchar(255) DEFAULT NULL,
+  `refer_customer` varchar(150) DEFAULT NULL,
+  `related_invoice` varchar(121) DEFAULT NULL,
+  `pref_delivery_agent` bigint(20) DEFAULT NULL,
+  `delivery_date` datetime DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `transaction_sell_lines`
+--
+
+CREATE TABLE `transaction_sell_lines` (
+  `id` int(10) UNSIGNED NOT NULL,
+  `transaction_id` int(10) UNSIGNED NOT NULL,
+  `product_id` int(10) UNSIGNED NOT NULL,
+  `variation_id` int(10) UNSIGNED NOT NULL,
+  `quantity` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `edit_quantity` decimal(22,4) NOT NULL DEFAULT 0.0000 COMMENT 'edit_quantity',
+  `quantity_returned` decimal(20,4) NOT NULL DEFAULT 0.0000,
+  `gar_box_return_qty` decimal(20,4) NOT NULL,
+  `gar_piece_return_qty` decimal(20,4) NOT NULL,
+  `gar_piece_return_price` decimal(20,2) NOT NULL DEFAULT 0.00,
+  `unit_price_before_discount` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `unit_price` decimal(22,4) DEFAULT NULL COMMENT 'Sell price excluding tax',
+  `line_discount_type` enum('fixed','percentage') DEFAULT NULL,
+  `line_discount_amount` decimal(22,4) NOT NULL DEFAULT 0.0000,
+  `unit_price_inc_tax` decimal(22,4) DEFAULT NULL COMMENT 'Sell price including tax',
+  `item_tax` decimal(22,4) NOT NULL COMMENT 'Tax for one quantity',
+  `tax_id` int(10) UNSIGNED DEFAULT NULL,
+  `discount_id` int(11) DEFAULT NULL,
+  `lot_no_line_id` int(11) DEFAULT NULL,
+  `sell_line_note` text DEFAULT NULL,
+  `box_no` varchar(191) DEFAULT NULL,
+  `woocommerce_line_items_id` int(11) DEFAULT NULL,
+  `res_service_staff_id` int(11) DEFAULT NULL,
+  `res_line_order_status` varchar(191) DEFAULT NULL,
+  `parent_sell_line_id` int(11) DEFAULT NULL,
+  `children_type` varchar(191) NOT NULL DEFAULT '' COMMENT 'Type of children for the parent, like modifier or combo',
+  `sub_unit_id` int(11) DEFAULT NULL,
+  `is_picked` tinyint(2) DEFAULT 0,
+  `is_packed` tinyint(2) NOT NULL DEFAULT 0,
+  `picking_started_time` text DEFAULT NULL,
+  `picking_completed_time` text DEFAULT NULL,
+  `packing_started_time` text DEFAULT NULL,
+  `packing_completed_time` text DEFAULT NULL,
+  `out_of_stock` tinyint(2) NOT NULL DEFAULT 0,
+  `edited` tinyint(2) NOT NULL DEFAULT 0,
+  `incorrect_location` tinyint(2) NOT NULL DEFAULT 0,
+  `out_of_stock_qty` int(11) DEFAULT 0,
+  `updated_piking_qty` int(22) DEFAULT NULL,
+  `packing_qty` int(11) DEFAULT 0,
+  `picking_status` tinyint(2) NOT NULL DEFAULT 0,
+  `packing_status` tinyint(2) DEFAULT 0,
+  `pos_line_tax_id` int(11) DEFAULT NULL,
+  `pos_line_tax_amount` decimal(15,2) DEFAULT NULL,
+  `city_tax_id` int(11) DEFAULT NULL,
+  `city_tax_amount` decimal(15,2) DEFAULT NULL,
+  `purchase_price` decimal(22,4) DEFAULT NULL,
+  `packing_box_no` int(3) DEFAULT NULL,
+  `back_order` tinyint(4) DEFAULT 0,
+  `created_at` timestamp NULL DEFAULT NULL,
+  `updated_at` timestamp NULL DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+--
+-- Indexes for dumped tables
+--
+
+--
+-- Indexes for table `brands`
+--
+ALTER TABLE `brands`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `brands_business_id_foreign` (`business_id`),
+  ADD KEY `brands_created_by_foreign` (`created_by`);
+
+--
+-- Indexes for table `categories`
+--
+ALTER TABLE `categories`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `categories_business_id_foreign` (`business_id`),
+  ADD KEY `categories_created_by_foreign` (`created_by`),
+  ADD KEY `categories_woocommerce_cat_id_index` (`woocommerce_cat_id`);
+
+--
+-- Indexes for table `products`
+--
+ALTER TABLE `products`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `products_brand_id_foreign` (`brand_id`),
+  ADD KEY `products_category_id_foreign` (`category_id`),
+  ADD KEY `products_sub_category_id_foreign` (`sub_category_id`),
+  ADD KEY `products_tax_foreign` (`tax`),
+  ADD KEY `products_name_index` (`name`),
+  ADD KEY `products_business_id_index` (`business_id`),
+  ADD KEY `products_unit_id_index` (`unit_id`),
+  ADD KEY `products_created_by_index` (`created_by`),
+  ADD KEY `products_warranty_id_index` (`warranty_id`),
+  ADD KEY `products_woocommerce_product_id_index` (`woocommerce_product_id`),
+  ADD KEY `products_woocommerce_media_id_index` (`woocommerce_media_id`),
+  ADD KEY `idx_products_id` (`id`,`category_id`,`brand_id`);
+
+--
+-- Indexes for table `product_group`
+--
+ALTER TABLE `product_group`
+  ADD PRIMARY KEY (`id`);
+
+--
+-- Indexes for table `transactions`
+--
+ALTER TABLE `transactions`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `transactions_tax_id_foreign` (`tax_id`),
+  ADD KEY `transactions_business_id_index` (`business_id`),
+  ADD KEY `transactions_type_index` (`type`),
+  ADD KEY `transactions_contact_id_index` (`contact_id`),
+  ADD KEY `transactions_transaction_date_index` (`transaction_date`),
+  ADD KEY `transactions_created_by_index` (`created_by`),
+  ADD KEY `transactions_location_id_index` (`location_id`),
+  ADD KEY `transactions_expense_for_foreign` (`expense_for`),
+  ADD KEY `transactions_expense_category_id_index` (`expense_category_id`),
+  ADD KEY `transactions_sub_type_index` (`sub_type`),
+  ADD KEY `transactions_return_parent_id_index` (`return_parent_id`),
+  ADD KEY `type` (`type`),
+  ADD KEY `transactions_status_index` (`status`),
+  ADD KEY `transactions_woocommerce_order_id_index` (`woocommerce_order_id`),
+  ADD KEY `transactions_picked_by_index` (`picked_by`),
+  ADD KEY `transactions_packed_by_index` (`packed_by`),
+  ADD KEY `idx_transactions_type_date_id` (`type`,`transaction_date`,`id`),
+  ADD KEY `idx_t_type_date` (`type`,`transaction_date`,`id`),
+  ADD KEY `idx_transactions_type_date` (`type`,`transaction_date`);
+
+--
+-- Indexes for table `transaction_sell_lines`
+--
+ALTER TABLE `transaction_sell_lines`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `transaction_sell_lines_transaction_id_foreign` (`transaction_id`),
+  ADD KEY `transaction_sell_lines_product_id_foreign` (`product_id`),
+  ADD KEY `transaction_sell_lines_variation_id_foreign` (`variation_id`),
+  ADD KEY `transaction_sell_lines_tax_id_foreign` (`tax_id`),
+  ADD KEY `transaction_sell_lines_children_type_index` (`children_type`),
+  ADD KEY `transaction_sell_lines_parent_sell_line_id_index` (`parent_sell_line_id`),
+  ADD KEY `transaction_sell_lines_woocommerce_line_items_id_index` (`woocommerce_line_items_id`),
+  ADD KEY `idx_tsl_transaction_variation` (`transaction_id`,`variation_id`),
+  ADD KEY `idx_tsl_product` (`product_id`),
+  ADD KEY `idx_tsl_transaction` (`transaction_id`),
+  ADD KEY `idx_tsl_transaction_id` (`transaction_id`);
+
+--
+-- AUTO_INCREMENT for dumped tables
+--
+
+--
+-- AUTO_INCREMENT for table `brands`
+--
+ALTER TABLE `brands`
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `categories`
+--
+ALTER TABLE `categories`
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `products`
+--
+ALTER TABLE `products`
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `product_group`
+--
+ALTER TABLE `product_group`
+  MODIFY `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `transactions`
+--
+ALTER TABLE `transactions`
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- AUTO_INCREMENT for table `transaction_sell_lines`
+--
+ALTER TABLE `transaction_sell_lines`
+  MODIFY `id` int(10) UNSIGNED NOT NULL AUTO_INCREMENT;
+
+--
+-- Constraints for dumped tables
+--
+
+--
+-- Constraints for table `brands`
+--
+ALTER TABLE `brands`
+  ADD CONSTRAINT `brands_business_id_foreign` FOREIGN KEY (`business_id`) REFERENCES `business` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `brands_created_by_foreign` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `categories`
+--
+ALTER TABLE `categories`
+  ADD CONSTRAINT `categories_business_id_foreign` FOREIGN KEY (`business_id`) REFERENCES `business` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `categories_created_by_foreign` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `products`
+--
+ALTER TABLE `products`
+  ADD CONSTRAINT `products_brand_id_foreign` FOREIGN KEY (`brand_id`) REFERENCES `brands` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `products_business_id_foreign` FOREIGN KEY (`business_id`) REFERENCES `business` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `products_category_id_foreign` FOREIGN KEY (`category_id`) REFERENCES `categories` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `products_created_by_foreign` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `products_sub_category_id_foreign` FOREIGN KEY (`sub_category_id`) REFERENCES `categories` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `products_tax_foreign` FOREIGN KEY (`tax`) REFERENCES `tax_rates` (`id`),
+  ADD CONSTRAINT `products_unit_id_foreign` FOREIGN KEY (`unit_id`) REFERENCES `units` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `transactions`
+--
+ALTER TABLE `transactions`
+  ADD CONSTRAINT `transactions_business_id_foreign` FOREIGN KEY (`business_id`) REFERENCES `business` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transactions_contact_id_foreign` FOREIGN KEY (`contact_id`) REFERENCES `contacts` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transactions_created_by_foreign` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transactions_expense_category_id_foreign` FOREIGN KEY (`expense_category_id`) REFERENCES `expense_categories` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transactions_expense_for_foreign` FOREIGN KEY (`expense_for`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transactions_location_id_foreign` FOREIGN KEY (`location_id`) REFERENCES `business_locations` (`id`),
+  ADD CONSTRAINT `transactions_tax_id_foreign` FOREIGN KEY (`tax_id`) REFERENCES `tax_rates` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `transaction_sell_lines`
+--
+ALTER TABLE `transaction_sell_lines`
+  ADD CONSTRAINT `transaction_sell_lines_product_id_foreign` FOREIGN KEY (`product_id`) REFERENCES `products` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transaction_sell_lines_tax_id_foreign` FOREIGN KEY (`tax_id`) REFERENCES `tax_rates` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transaction_sell_lines_transaction_id_foreign` FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `transaction_sell_lines_variation_id_foreign` FOREIGN KEY (`variation_id`) REFERENCES `variations` (`id`) ON DELETE CASCADE;
+COMMIT;
+
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;

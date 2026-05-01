@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.db
+*.sqlite3
+.env
+.vscode/
+fuzzy_search_app/db_settings.json
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+local.db-wal

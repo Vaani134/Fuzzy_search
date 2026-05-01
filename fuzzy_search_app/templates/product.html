@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+
+{% block title %}{{ product.name }} — Fuzzy Search{% endblock %}
+
+{% block content %}
+
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb">
+    <li class="breadcrumb-item"><a href="/">Search</a></li>
+    <li class="breadcrumb-item active">{{ product.name }}</li>
+  </ol>
+</nav>
+
+<div class="row g-4">
+
+  <!-- ── Image column ── -->
+  <div class="col-md-4">
+    <div class="card shadow-sm border-0">
+      {% set img = (product.main_image or product.image) | img_url %}
+      {% if img %}
+      <img
+        src="{{ img }}"
+        alt="{{ product.name }}"
+        class="card-img-top"
+        style="max-height:320px; object-fit:contain; background:#f8fafc; padding:1rem;"
+        onerror="this.style.display='none'; document.getElementById('img-placeholder').style.display='flex';"
+      />
+      <div id="img-placeholder"
+           style="display:none; height:320px; background:#f1f5f9; align-items:center; justify-content:center; font-size:5rem; color:#cbd5e1;">
+        <i class="bi bi-box-seam"></i>
+      </div>
+      {% else %}
+      <div style="height:320px; background:#f1f5f9; display:flex; align-items:center; justify-content:center; font-size:5rem; color:#cbd5e1;">
+        <i class="bi bi-box-seam"></i>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ── Details column ── -->
+  <div class="col-md-8">
+    <h2 class="fw-bold mb-1">{{ product.name }}</h2>
+
+    <!-- Badges -->
+    <div class="mb-3 d-flex flex-wrap gap-2">
+      {% if product.brand_name %}
+      <span class="badge bg-secondary fs-6">{{ product.brand_name }}</span>
+      {% endif %}
+      {% if product.category_name %}
+      <span class="badge bg-primary fs-6">{{ product.category_name }}</span>
+      {% endif %}
+      {% if product.group_name %}
+      <span class="badge bg-info text-dark fs-6">{{ product.group_name }}</span>
+      {% endif %}
+      {% if product.out_of_stock %}
+      <span class="badge bg-danger fs-6">Out of Stock</span>
+      {% endif %}
+      {% if product.is_inactive %}
+      <span class="badge bg-warning text-dark fs-6">Inactive</span>
+      {% endif %}
+    </div>
+
+    <!-- Pricing -->
+    <div class="mb-3">
+      {% if product.sales_price %}
+      <span class="fs-3 fw-bold text-success">${{ "%.2f"|format(product.sales_price) }}</span>
+      {% if product.srp and product.srp != product.sales_price %}
+      <span class="text-muted text-decoration-line-through ms-2">${{ "%.2f"|format(product.srp) }}</span>
+      {% endif %}
+      {% elif product.srp %}
+      <span class="fs-3 fw-bold text-secondary">${{ "%.2f"|format(product.srp) }}</span>
+      {% else %}
+      <span class="text-muted">Price not set</span>
+      {% endif %}
+    </div>
+
+    <!-- Description -->
+    {% if product.product_description %}
+    <p class="text-muted mb-3">{{ product.product_description }}</p>
+    {% endif %}
+
+    <!-- Key fields table -->
+    <table class="table table-sm table-bordered">
+      <tbody>
+        {% if product.sku %}
+        <tr><th class="w-35 bg-light">SKU</th><td>{{ product.sku }}</td></tr>
+        {% endif %}
+        {% if product.sku2 %}
+        <tr><th class="bg-light">SKU 2</th><td>{{ product.sku2 }}</td></tr>
+        {% endif %}
+        {% if product.item_code %}
+        <tr><th class="bg-light">Item Code</th><td>{{ product.item_code }}</td></tr>
+        {% endif %}
+        {% if product.type %}
+        <tr><th class="bg-light">Type</th><td>{{ product.type }}</td></tr>
+        {% endif %}
+        {% if product.qty_box %}
+        <tr><th class="bg-light">Qty / Box</th><td>{{ product.qty_box }}</td></tr>
+        {% endif %}
+        {% if product.case_qty %}
+        <tr><th class="bg-light">Case Qty</th><td>{{ product.case_qty }}</td></tr>
+        {% endif %}
+        {% if product.weight %}
+        <tr><th class="bg-light">Weight</th><td>{{ product.weight }}</td></tr>
+        {% endif %}
+        {% if product.ml %}
+        <tr><th class="bg-light">ML</th><td>{{ product.ml }}</td></tr>
+        {% endif %}
+        {% if product.aisle or product.rack or product.shelf or product.bin %}
+        <tr>
+          <th class="bg-light">Location</th>
+          <td>
+            Aisle {{ product.aisle }} &bull;
+            Rack {{ product.rack }} &bull;
+            Shelf {{ product.shelf }} &bull;
+            Bin {{ product.bin }}
+          </td>
+        </tr>
+        {% endif %}
+        {% if product.barcode_type %}
+        <tr><th class="bg-light">Barcode</th><td>{{ product.barcode_type }}</td></tr>
+        {% endif %}
+        {% if product.group_variation_name %}
+        <tr><th class="bg-light">Variation</th><td>{{ product.group_variation_name }}</td></tr>
+        {% endif %}
+        {% if product.note %}
+        <tr><th class="bg-light">Note</th><td>{{ product.note }}</td></tr>
+        {% endif %}
+        {% if product.updated_at %}
+        <tr><th class="bg-light">Last Updated</th><td>{{ product.updated_at }}</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+
+    <a href="javascript:history.back()" class="btn btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i>Back
+    </a>
+    {% set img = (product.main_image or product.image) | img_url %}
+    <button
+      class="btn btn-outline-primary ms-2"
+      id="detail-cart-btn"
+      data-product-id="{{ product.id }}"
+      data-product-name="{{ product.name | e }}"
+      data-product-img="{{ img }}"
+      onclick="handleDetailCart(this)"
+    >
+      <i class="bi bi-download me-1"></i>Add to Download Cart
+    </button>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const btn = document.getElementById("detail-cart-btn");
+    if (!btn) return;
+    const id = parseInt(btn.dataset.productId);
+    if (CartManager.has(id)) {
+      btn.innerHTML = '<i class="bi bi-check me-1"></i>In Download Cart';
+      btn.classList.replace("btn-outline-primary", "btn-success");
+    }
+  });
+
+  function handleDetailCart(btn) {
+    const id   = parseInt(btn.dataset.productId);
+    const name = btn.dataset.productName;
+    const img  = btn.dataset.productImg;
+
+    if (CartManager.has(id)) {
+      CartManager.remove(id);
+      btn.innerHTML = '<i class="bi bi-download me-1"></i>Add to Download Cart';
+      btn.classList.replace("btn-success", "btn-outline-primary");
+    } else {
+      CartManager.add(id, name, img);
+      btn.innerHTML = '<i class="bi bi-check me-1"></i>In Download Cart';
+      btn.classList.replace("btn-outline-primary", "btn-success");
+    }
+  }
+</script>
+{% endblock %}

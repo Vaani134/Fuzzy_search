@@ -1,0 +1,379 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Fuzzy Search{% endblock %}
+
+{% block extra_head %}
+<style>
+  .stat-card {
+    border: none;
+    border-radius: .75rem;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  .stat-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 10px 28px rgba(0,0,0,.10) !important;
+  }
+  .stat-icon {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem;
+  }
+  .stat-value { font-size: 2rem; font-weight: 700; line-height: 1; }
+  .stat-label { font-size: .8rem; color: #64748b; margin-top: .2rem; }
+
+  .bar-row { display: flex; align-items: center; gap: .75rem; margin-bottom: .55rem; }
+  .bar-label { width: 160px; font-size: .82rem; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; }
+  .bar-track { flex: 1; height: 10px; background: #e2e8f0; border-radius: 5px; overflow: hidden; }
+  .bar-fill  { height: 100%; border-radius: 5px; transition: width .5s ease; }
+  .bar-count { width: 40px; text-align: right; font-size: .8rem; color: #64748b; flex-shrink: 0; }
+
+  .sync-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .sync-dot.ok    { background: #16a34a; }
+  .sync-dot.error { background: #dc2626; }
+  .sync-dot.pending { background: #d97706; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- ── Header ── -->
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <div>
+    <h2 class="fw-bold mb-0"><i class="bi bi-speedometer2 text-primary me-2"></i>Dashboard</h2>
+    <small class="text-muted">Live data from SQLite cache &bull; Last updated {{ now.strftime('%b %d, %Y %H:%M') }}</small>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="/search" class="btn btn-primary">
+      <i class="bi bi-search me-1"></i>Search Products
+    </a>
+    <a href="/sync" class="btn btn-outline-secondary">
+      <i class="bi bi-arrow-repeat me-1"></i>Sync Data
+    </a>
+  </div>
+</div>
+
+<!-- ── Stat cards row ── -->
+<div class="row g-3 mb-4">
+
+  <!-- Active Products -->
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-primary">{{ total_products | default(0) }}</div>
+          <div class="stat-label">Active Products</div>
+          <small class="text-muted">{{ total_all_products }} total &bull; {{ inactive_products }} inactive</small>
+        </div>
+        <div class="stat-icon bg-primary bg-opacity-10 text-primary">
+          <i class="bi bi-box-seam"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Categories -->
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-success">{{ total_categories | default(0) }}</div>
+          <div class="stat-label">Categories</div>
+          <small class="text-muted">{{ total_groups }} product groups</small>
+        </div>
+        <div class="stat-icon bg-success bg-opacity-10 text-success">
+          <i class="bi bi-tags"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Brands -->
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-warning">{{ total_brands | default(0) }}</div>
+          <div class="stat-label">Brands</div>
+          <small class="text-muted">&nbsp;</small>
+        </div>
+        <div class="stat-icon bg-warning bg-opacity-10 text-warning">
+          <i class="bi bi-award"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transactions -->
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-info">{{ total_transactions | default(0) }}</div>
+          <div class="stat-label">Transactions</div>
+          <small class="text-muted">&nbsp;</small>
+        </div>
+        <div class="stat-icon bg-info bg-opacity-10 text-info">
+          <i class="bi bi-receipt"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Second row: stock alerts ── -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3 border-danger border-opacity-25">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-danger">{{ out_of_stock | default(0) }}</div>
+          <div class="stat-label">Out of Stock</div>
+        </div>
+        <div class="stat-icon bg-danger bg-opacity-10 text-danger">
+          <i class="bi bi-exclamation-triangle"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3 border-secondary border-opacity-25">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-secondary">{{ inactive_products | default(0) }}</div>
+          <div class="stat-label">Inactive Products</div>
+        </div>
+        <div class="stat-icon bg-secondary bg-opacity-10 text-secondary">
+          <i class="bi bi-slash-circle"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3 border-secondary border-opacity-25">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-secondary">{{ not_for_selling | default(0) }}</div>
+          <div class="stat-label">Not for Selling</div>
+          <small class="text-muted">components / modifiers</small>
+        </div>
+        <div class="stat-icon bg-secondary bg-opacity-10 text-secondary">
+          <i class="bi bi-cart-x"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-primary">{{ eng_stats.total_products | default(0) }}</div>
+          <div class="stat-label">Indexed for Search</div>
+        </div>
+        <div class="stat-icon bg-primary bg-opacity-10 text-primary">
+          <i class="bi bi-lightning"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card shadow-sm h-100 p-3">
+      <div class="d-flex justify-content-between align-items-start">
+        <div>
+          <div class="stat-value text-dark">
+            {% if eng_stats.last_built %}
+              <span style="font-size:1rem;">
+                {{ (now.timestamp() - eng_stats.last_built) | int }}s ago
+              </span>
+            {% else %}
+              <span style="font-size:1rem;">—</span>
+            {% endif %}
+          </div>
+          <div class="stat-label">Index Last Built</div>
+        </div>
+        <div class="stat-icon bg-dark bg-opacity-10 text-dark">
+          <i class="bi bi-clock-history"></i>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Charts row ── -->
+<div class="row g-4 mb-4">
+
+  <!-- Top Categories bar chart -->
+  <div class="col-md-6">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-tags text-success me-2"></i>Top Categories by Product Count
+        </h6>
+        {% if top_categories %}
+          {% set max_cat = top_categories[0].product_count if top_categories[0].product_count > 0 else 1 %}
+          {% for row in top_categories %}
+          <div class="bar-row">
+            <span class="bar-label" title="{{ row.name }}">{{ row.name }}</span>
+            <div class="bar-track">
+              <div class="bar-fill bg-success"
+                   style="width: {{ ((row.product_count / max_cat) * 100) | round(1) }}%;">
+              </div>
+            </div>
+            <span class="bar-count">{{ row.product_count }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="text-muted small">No data yet. Run a sync first.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Brands bar chart -->
+  <div class="col-md-6">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-award text-warning me-2"></i>Top Brands by Product Count
+        </h6>
+        {% if top_brands %}
+          {% set max_br = top_brands[0].product_count if top_brands[0].product_count > 0 else 1 %}
+          {% for row in top_brands %}
+          <div class="bar-row">
+            <span class="bar-label" title="{{ row.name }}">{{ row.name }}</span>
+            <div class="bar-track">
+              <div class="bar-fill bg-warning"
+                   style="width: {{ ((row.product_count / max_br) * 100) | round(1) }}%;">
+              </div>
+            </div>
+            <span class="bar-count">{{ row.product_count }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="text-muted small">No data yet. Run a sync first.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Bottom row: sync status + recent transactions ── -->
+<div class="row g-4">
+
+  <!-- Sync status -->
+  <div class="col-md-5">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0">
+            <i class="bi bi-arrow-repeat text-primary me-2"></i>Sync Status
+          </h6>
+          <a href="/sync" class="btn btn-sm btn-outline-primary">Manage</a>
+        </div>
+        {% if sync_status %}
+        <table class="table table-sm mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Table</th>
+              <th>Records</th>
+              <th>Status</th>
+              <th>Last Sync</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in sync_status %}
+            <tr>
+              <td><code style="font-size:.75rem;">{{ row.table_name }}</code></td>
+              <td>{{ row.records_synced }}</td>
+              <td>
+                <span class="sync-dot {{ row.status }}"></span>
+                <small>{{ row.status }}</small>
+              </td>
+              <td>
+                <small class="text-muted">
+                  {{ row.last_synced[:16] if row.last_synced else '—' }}
+                </small>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="text-center py-4 text-muted">
+          <i class="bi bi-database-x" style="font-size:2.5rem; opacity:.3;"></i>
+          <p class="mt-2 small">No sync history. Go to Sync page to load data from MySQL.</p>
+          <a href="/sync" class="btn btn-primary btn-sm">Run First Sync</a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent transactions -->
+  <div class="col-md-7">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-receipt text-info me-2"></i>Recent Transactions
+        </h6>
+        {% if recent_transactions %}
+        <div class="table-responsive">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Invoice</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Payment</th>
+                <th class="text-end">Total</th>
+                <th>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for t in recent_transactions %}
+              <tr>
+                <td><small>{{ t.invoice_no or '—' }}</small></td>
+                <td><span class="badge bg-secondary">{{ t.type or '—' }}</span></td>
+                <td><small>{{ t.status }}</small></td>
+                <td>
+                  {% if t.payment_status == 'paid' %}
+                  <span class="badge bg-success">paid</span>
+                  {% elif t.payment_status == 'due' %}
+                  <span class="badge bg-danger">due</span>
+                  {% elif t.payment_status == 'partial' %}
+                  <span class="badge bg-warning text-dark">partial</span>
+                  {% else %}
+                  <span class="text-muted">—</span>
+                  {% endif %}
+                </td>
+                <td class="text-end fw-bold">
+                  {% if t.final_total %}${{ "%.2f"|format(t.final_total) }}{% else %}—{% endif %}
+                </td>
+                <td><small class="text-muted">{{ t.transaction_date[:10] if t.transaction_date else '—' }}</small></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="text-center py-4 text-muted">
+          <i class="bi bi-receipt" style="font-size:2.5rem; opacity:.3;"></i>
+          <p class="mt-2 small">No transactions synced yet.</p>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+  // Auto-refresh dashboard every 60 seconds
+  setTimeout(() => location.reload(), 60000);
+</script>
+{% endblock %}
