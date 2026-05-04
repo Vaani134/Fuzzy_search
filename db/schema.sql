@@ -168,12 +168,27 @@ CREATE TABLE IF NOT EXISTS sync_log (
 );
 
 -- ─── search_history (analytics: every search query logged) ───────────────────
+--
+-- Column notes:
+--   result_count    : raw count returned for this specific search event
+--   is_zero_result  : 1 if result_count = 0, else 0  (indexed for fast filtering)
+--   search_count    : cumulative counter — incremented each time the same
+--                     normalised query is searched again.  Starts at 1.
+--                     Allows trending queries to be identified without a
+--                     full GROUP BY scan on every request.
+--   last_searched   : timestamp of the most recent search for this query,
+--                     updated on every repeat.  Used for trending (24h window).
 CREATE TABLE IF NOT EXISTS search_history (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    query        TEXT    NOT NULL,
-    result_count INTEGER NOT NULL DEFAULT 0,
-    timestamp    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    query           TEXT    NOT NULL,
+    result_count    INTEGER NOT NULL DEFAULT 0,
+    timestamp       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_zero_result  INTEGER NOT NULL DEFAULT 0,   -- BOOLEAN: 1 = zero results
+    search_count    INTEGER NOT NULL DEFAULT 1,   -- cumulative repeat counter
+    last_searched   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_search_history_query     ON search_history(query);
-CREATE INDEX IF NOT EXISTS idx_search_history_timestamp ON search_history(timestamp);
+CREATE INDEX IF NOT EXISTS idx_search_history_query          ON search_history(query);
+CREATE INDEX IF NOT EXISTS idx_search_history_timestamp      ON search_history(timestamp);
+CREATE INDEX IF NOT EXISTS idx_search_history_zero_result    ON search_history(is_zero_result);
+CREATE INDEX IF NOT EXISTS idx_search_history_last_searched  ON search_history(last_searched);

@@ -51,10 +51,13 @@ def _run_migrations() -> None:
     Apply schema additions that may be missing from older database files.
     Each migration is wrapped in a try/except so a single failure does not
     prevent the app from starting.
+
+    SQLite does not support IF NOT EXISTS on ALTER TABLE, so we catch the
+    OperationalError that fires when a column already exists and move on.
     """
     conn = get_connection()
     try:
-        # Migration 1: search_history table (added in v2)
+        # ── Migration 1: search_history table (added in v2) ───────────────────
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS search_history (
@@ -73,11 +76,81 @@ def _run_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_search_history_timestamp "
             "ON search_history(timestamp)"
         )
+
+        # ── Migration 2: analytics columns (added in v3) ──────────────────────
+        # is_zero_result — 1 when the search returned no results.
+        # Existing rows default to 0 (unknown / assumed non-zero), which is
+        # the safe backward-compatible value.
+        _add_column_if_missing(
+            conn,
+            table="search_history",
+            column="is_zero_result",
+            definition="INTEGER NOT NULL DEFAULT 0",
+        )
+
+        # search_count — cumulative counter for repeated identical queries.
+        # Existing rows default to 1 (each old row represents one search event).
+        _add_column_if_missing(
+            conn,
+            table="search_history",
+            column="search_count",
+            definition="INTEGER NOT NULL DEFAULT 1",
+        )
+
+        # last_searched — timestamp of the most recent search for this query.
+        # Existing rows default to their original timestamp so trending queries
+        # computed over a 24-hour window degrade gracefully on old data.
+        _add_column_if_missing(
+            conn,
+            table="search_history",
+            column="last_searched",
+            definition="TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        )
+
+        # Indexes for the new columns (CREATE INDEX IF NOT EXISTS is safe to
+        # run repeatedly — SQLite ignores it when the index already exists).
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_history_zero_result "
+            "ON search_history(is_zero_result)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_history_last_searched "
+            "ON search_history(last_searched)"
+        )
+
         conn.commit()
     except Exception as exc:
         print(f"[DB] Migration warning: {exc}")
     finally:
         conn.close()
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    """
+    Add *column* to *table* only if it does not already exist.
+
+    SQLite raises ``OperationalError: duplicate column name`` when you
+    ALTER TABLE ADD COLUMN on an existing column.  We catch that specific
+    error and treat it as a no-op so migrations are fully idempotent.
+
+    Parameters
+    ----------
+    conn       : open SQLite connection
+    table      : table name
+    column     : column name to add
+    definition : SQL type + constraints, e.g. "INTEGER NOT NULL DEFAULT 0"
+    """
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except sqlite3.OperationalError as exc:
+        # "duplicate column name: <column>" means it already exists — safe to ignore.
+        if "duplicate column name" not in str(exc).lower():
+            raise  # re-raise anything unexpected
 
 
 def dict_from_row(row: sqlite3.Row) -> dict:

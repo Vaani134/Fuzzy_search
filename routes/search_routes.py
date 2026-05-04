@@ -19,7 +19,8 @@ from flask import Blueprint, request, jsonify
 
 from modules.fuzzy_search import get_engine, apply_synonyms, get_query_suggestion
 from modules.autocomplete import get_suggestions
-from modules.analytics import log_search, get_recent_searches, get_top_queries
+from modules.analytics import log_search, get_recent_searches, get_top_queries, \
+    get_zero_result_queries, get_trending_queries
 from modules.cache import search_cache
 from config import SEARCH_DEFAULT_K
 
@@ -181,7 +182,8 @@ def api_search():
 def api_search_history():
     """
     GET /api/search/history?limit=10
-    Returns the most recent search queries.
+    Returns the most recently searched queries (by last_searched desc).
+    Each row includes search_count, is_zero_result, and last_searched.
     """
     limit = min(max(1, _int_param("limit", 10)), 100)
     return jsonify(get_recent_searches(limit=limit))
@@ -193,10 +195,37 @@ def api_search_history():
 def api_search_top():
     """
     GET /api/search/top?limit=10
-    Returns the most frequently searched queries.
+    Returns the most frequently searched queries (by cumulative search_count).
     """
     limit = min(max(1, _int_param("limit", 10)), 100)
     return jsonify(get_top_queries(limit=limit))
+
+
+# ── GET /api/search/zero-results ──────────────────────────────────────────────
+
+@search_bp.route("/api/search/zero-results")
+def api_search_zero_results():
+    """
+    GET /api/search/zero-results?limit=10
+    Returns queries that currently return zero results, ranked by how
+    often they have been attempted.  Useful for identifying catalog gaps.
+    """
+    limit = min(max(1, _int_param("limit", 10)), 100)
+    return jsonify(get_zero_result_queries(limit=limit))
+
+
+# ── GET /api/search/trending ───────────────────────────────────────────────────
+
+@search_bp.route("/api/search/trending")
+def api_search_trending():
+    """
+    GET /api/search/trending?hours=24&limit=10
+    Returns the most-searched queries within the last N hours.
+    Default window: 24 hours.
+    """
+    hours = min(max(1, _int_param("hours", 24)), 720)   # cap at 30 days
+    limit = min(max(1, _int_param("limit", 10)), 100)
+    return jsonify(get_trending_queries(hours=hours, limit=limit))
 
 
 # ── POST /api/search/rebuild ───────────────────────────────────────────────────
