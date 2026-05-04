@@ -80,24 +80,105 @@ SYNONYMS: Dict[str, str] = {
 }
 
 
+def _build_synonym_regex() -> tuple:
+    """
+    Pre-compile a single regex that matches ALL synonym keys in one pass.
+
+    Why one combined pattern instead of a loop?
+    --------------------------------------------
+    A loop applies replacements sequentially, so a later synonym can
+    accidentally match text that was just written by an earlier one.
+    Example with a loop:
+        "sheesha" → "hookah"          (first replacement)
+        "hooka"   matches in "hookah" → "hookaah"  (second replacement, wrong!)
+
+    A single alternation pattern is applied in ONE scan of the string.
+    The regex engine advances past each match without revisiting it, so
+    no replacement can ever be re-processed.
+
+    Construction rules:
+      1. Sort keys by descending length so longer phrases (e.g. "e cig")
+         are tried before shorter ones (e.g. "ecig") at each position.
+      2. Wrap each key with \b word boundaries to block partial matches
+         ("pip" must not fire inside "pipe").
+      3. Compile with re.IGNORECASE so the match is case-insensitive while
+         the replacement is always the canonical lowercase form.
+
+    Returns
+    -------
+    (compiled_pattern, lookup_dict)
+        lookup_dict maps lowercase variant → canonical replacement,
+        used by the substitution callback.
+    """
+    # Sort longest key first — regex alternation is left-to-right greedy,
+    # so the longer option must appear first to win at any given position.
+    sorted_variants = sorted(SYNONYMS.keys(), key=len, reverse=True)
+
+    # Build alternation: \b(variant1|variant2|...)\b
+    alternation = "|".join(re.escape(v) for v in sorted_variants)
+    pattern = re.compile(r"\b(?:" + alternation + r")\b", re.IGNORECASE)
+
+    # Lowercase lookup so the callback can resolve any case variant
+    lookup = {k.lower(): v for k, v in SYNONYMS.items()}
+
+    return pattern, lookup
+
+
+# Compile once at import time — not on every function call.
+_SYNONYM_PATTERN, _SYNONYM_LOOKUP = _build_synonym_regex()
+
+
 def apply_synonyms(query: str) -> str:
     """
-    Replace known synonym tokens in `query` with their canonical forms.
+    Expand known synonym variants in *query* to their canonical forms.
 
-    Uses word-boundary regex matching so that short synonyms like "pip"
-    don't accidentally match inside longer words like "pipe".
+    Algorithm
+    ---------
+    Uses a single pre-compiled regex alternation so the entire string is
+    scanned exactly once.  Each matched token is replaced via a lookup
+    callback; unmatched text is passed through unchanged.
 
-    Returns the expanded query (may be identical to input if no synonyms found).
+    Properties guaranteed by this implementation:
+      • Word-boundary safety  — "pip" never fires inside "pipe"
+      • No double replacement — "sheesha" → "hookah", not "hookaah"
+      • Longest-match first   — "e cig" wins over "ecig" at the same position
+      • Case-insensitive      — "Sheesha", "SHEESHA", "sheesha" all expand
+      • Original spacing kept — only the matched token is replaced
+
+    Parameters
+    ----------
+    query : str
+        Raw user input, any casing.
+
+    Returns
+    -------
+    str
+        Query with synonym variants replaced by canonical terms.
+        Identical to input if no synonyms are found.
+
+    Examples
+    --------
+    >>> apply_synonyms("sheesha pipe")
+    'hookah pipe'
+    >>> apply_synonyms("hooka")
+    'hookah'
+    >>> apply_synonyms("glass pipe")
+    'glass pipe'
+    >>> apply_synonyms("SHISHA grider")
+    'hookah grinder'
     """
     q = query.lower().strip()
+    if not q:
+        return q
 
-    # Sort by length descending so multi-word phrases are matched first
-    for variant, canonical in sorted(SYNONYMS.items(), key=lambda x: -len(x[0])):
-        # Use word boundaries (\b) to avoid partial-word replacement
-        pattern = r'\b' + re.escape(variant) + r'\b'
-        q = re.sub(pattern, canonical, q)
-
-    return q
+    # re.sub with a callable replacement:
+    #   match.group(0) is the exact text that was matched (lowercased via q).
+    #   _SYNONYM_LOOKUP[matched_text] returns the canonical replacement.
+    #   The regex engine advances past each match, so no position is visited twice.
+    return _SYNONYM_PATTERN.sub(
+        lambda m: _SYNONYM_LOOKUP[m.group(0).lower()],
+        q,
+    )
 
 
 # ── Text normaliser ────────────────────────────────────────────────────────────
