@@ -262,9 +262,10 @@ def index():
         top_score  = all_results[0]["score"] if all_results else 0.0
         suggestion = get_query_suggestion(query, choices=top_names, top_result_score=top_score)
 
-        # Log search
+        # Log search — pass top_score so the synonym suggester can detect
+        # low-confidence queries (e.g. "grdiner" scores ~60, not zero results)
         from modules.analytics import log_search
-        log_search(query, total_results)
+        log_search(query, total_results, top_score)
 
     else:
         suggestion = None

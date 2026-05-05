@@ -125,6 +125,24 @@ def _run_migrations() -> None:
         # just created (needs seeding) or already existed (skip seeding).
         _migrate_synonyms(conn)
 
+        # ── Migration 4: synonym_suggestions table (added in v5) ──────────────
+        _migrate_synonym_suggestions(conn)
+
+        # ── Migration 5: top_score column on search_history (added in v6) ────
+        # Existing rows default to 0.0 — safe backward-compatible value meaning
+        # "score unknown".  The suggester treats 0.0 as weak (< 70 threshold).
+        _add_column_if_missing(
+            conn,
+            table="search_history",
+            column="top_score",
+            definition="REAL NOT NULL DEFAULT 0.0",
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_search_history_top_score "
+            "ON search_history(top_score)"
+        )
+        conn.commit()
+
     except Exception as exc:
         print(f"[DB] Migration warning: {exc}")
     finally:
@@ -196,6 +214,40 @@ def _migrate_synonyms(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
     print(f"[DB] Synonyms table ready ({len(_DEFAULT_SYNONYMS)} defaults seeded if new).")
+
+
+def _migrate_synonym_suggestions(conn: sqlite3.Connection) -> None:
+    """
+    Create the synonym_suggestions table if it doesn't exist.
+    Idempotent — safe to run on every startup.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS synonym_suggestions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            variant    TEXT    NOT NULL,
+            canonical  TEXT    NOT NULL,
+            score      REAL    NOT NULL,
+            status     TEXT    NOT NULL DEFAULT 'pending',
+            created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(variant)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_syn_sug_status  "
+        "ON synonym_suggestions(status)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_syn_sug_variant "
+        "ON synonym_suggestions(variant)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_syn_sug_score   "
+        "ON synonym_suggestions(score)"
+    )
+    conn.commit()
+    print("[DB] synonym_suggestions table ready.")
 
 
 def _add_column_if_missing(

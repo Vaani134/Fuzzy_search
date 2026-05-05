@@ -142,8 +142,9 @@ def api_search():
     # We cap at 200 names so this stays fast — the top results are the most
     # relevant candidates anyway.
     top_names = [r["name"] for r in all_results[:200] if r.get("name")]
-    # Pass the best result's score so the function can decide whether results
-    # are already strong enough (≥ 70) to skip the suggestion entirely.
+    # top_score: score of the best result — used by suggestion logic AND
+    # persisted to search_history so the synonym suggester can detect
+    # queries that returned results but with low confidence (score < 70).
     top_score = all_results[0]["score"] if all_results else 0.0
     suggestion = get_query_suggestion(
         query,
@@ -151,8 +152,11 @@ def api_search():
         top_result_score=top_score,
     )
 
-    # ── Log to analytics (async-safe: just a DB insert) ───────────────────────
-    log_search(query, total_results)
+    # ── Log to analytics ──────────────────────────────────────────────────────
+    # top_score is stored so the synonym suggester can distinguish between
+    # "grdiner" (returns results but score ~60 → weak) and
+    # "grinder"  (returns results with score ~95 → strong, skip).
+    log_search(query, total_results, top_score)
 
     # ── Build response ────────────────────────────────────────────────────────
     response = {

@@ -178,6 +178,10 @@ CREATE TABLE IF NOT EXISTS sync_log (
 --                     full GROUP BY scan on every request.
 --   last_searched   : timestamp of the most recent search for this query,
 --                     updated on every repeat.  Used for trending (24h window).
+--   top_score       : fuzzy score of the best result (0–100).  0.0 when no
+--                     results.  Used by the synonym suggester to detect queries
+--                     that returned results but with low confidence — these are
+--                     better synonym candidates than zero-result queries alone.
 CREATE TABLE IF NOT EXISTS search_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     query           TEXT    NOT NULL,
@@ -185,7 +189,8 @@ CREATE TABLE IF NOT EXISTS search_history (
     timestamp       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_zero_result  INTEGER NOT NULL DEFAULT 0,   -- BOOLEAN: 1 = zero results
     search_count    INTEGER NOT NULL DEFAULT 1,   -- cumulative repeat counter
-    last_searched   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+    last_searched   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    top_score       REAL    NOT NULL DEFAULT 0.0  -- best result score (0–100)
 );
 
 CREATE INDEX IF NOT EXISTS idx_search_history_query          ON search_history(query);
@@ -213,3 +218,30 @@ CREATE TABLE IF NOT EXISTS synonyms (
 
 CREATE INDEX IF NOT EXISTS idx_synonyms_variant   ON synonyms(variant);
 CREATE INDEX IF NOT EXISTS idx_synonyms_canonical ON synonyms(canonical);
+
+-- ─── synonym_suggestions (AI-generated candidates awaiting admin review) ──────
+--
+-- The suggester compares low-result search queries against product keywords
+-- using RapidFuzz.  Matches in the 60–85 score band are stored here as
+-- "pending" candidates.  An admin reviews them via the API and either
+-- approves (→ copied to synonyms table) or rejects them.
+--
+-- status values:
+--   pending  — awaiting admin review
+--   approved — moved to synonyms table; synonym is now active
+--   rejected — admin dismissed this suggestion
+--
+-- UNIQUE(variant) prevents the same misspelling from being suggested twice.
+CREATE TABLE IF NOT EXISTS synonym_suggestions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    variant    TEXT    NOT NULL,
+    canonical  TEXT    NOT NULL,
+    score      REAL    NOT NULL,          -- RapidFuzz WRatio score (0–100)
+    status     TEXT    NOT NULL DEFAULT 'pending',
+    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(variant)
+);
+
+CREATE INDEX IF NOT EXISTS idx_syn_sug_status    ON synonym_suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_syn_sug_variant   ON synonym_suggestions(variant);
+CREATE INDEX IF NOT EXISTS idx_syn_sug_score     ON synonym_suggestions(score);

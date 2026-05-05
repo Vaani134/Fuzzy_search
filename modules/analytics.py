@@ -20,6 +20,7 @@ Table: search_history
   is_zero_result  INTEGER  1 if result_count = 0, else 0
   search_count    INTEGER  cumulative count of times this query was searched
   last_searched   TEXT     ISO-8601 UTC — updated on every repeat search
+  top_score       REAL     fuzzy score of the best result (0–100); 0.0 = no results
 
 Design: one row per unique query (upsert pattern)
 -------------------------------------------------
@@ -34,6 +35,11 @@ Old rows (created before v3) have is_zero_result=0, search_count=1, and
 last_searched=CURRENT_TIMESTAMP (set by the migration default).  They are
 treated as single-event rows and will be updated correctly on the next
 search for the same query.
+
+Old rows (created before v6) have top_score=0.0 (migration default).  The
+synonym suggester treats 0.0 as a weak score (< 70), so old rows are
+conservatively included in suggestion candidates — the worst outcome is a
+few extra suggestions for the admin to review.
 """
 
 import sys
@@ -54,55 +60,54 @@ def _now_iso() -> str:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def log_search(query: str, result_count: int) -> None:
+def log_search(query: str, result_count: int, top_score: float = 0.0) -> None:
     """
-    Record a search event.  Existing signature is preserved — callers do
-    not need to change.
+    Record a search event.
+
+    Backward compatible — existing callers that pass only (query, result_count)
+    continue to work; top_score defaults to 0.0 (treated as weak by the
+    synonym suggester, which is the safe conservative choice).
 
     Behaviour
     ---------
     • First time a query is seen  → INSERT a new row (search_count = 1).
     • Query seen again            → UPDATE: increment search_count,
-                                    refresh last_searched, update result_count
-                                    and is_zero_result to reflect the latest
-                                    search outcome.
-
-    The upsert is implemented as INSERT OR IGNORE followed by UPDATE so it
-    works correctly on SQLite without requiring ON CONFLICT DO UPDATE syntax
-    (which needs SQLite ≥ 3.24 and is not universally available).
+                                    refresh last_searched, update result_count,
+                                    is_zero_result, and top_score to reflect
+                                    the latest search outcome.
 
     Parameters
     ----------
     query        : raw user query string (will be lowercased + stripped)
     result_count : number of results the search returned
+    top_score    : fuzzy score of the best result (0–100); 0.0 when no results.
+                   Used by the synonym suggester to detect low-confidence queries.
     """
     if not query or not query.strip():
         return
 
-    normalised    = query.strip().lower()
-    is_zero       = 1 if result_count == 0 else 0
-    now           = _now_iso()
+    normalised = query.strip().lower()
+    is_zero    = 1 if result_count == 0 else 0
+    score      = round(float(top_score), 2)
+    now        = _now_iso()
 
     conn = get_connection()
     try:
         # Step 1 — ensure a row exists for this query.
-        # INSERT OR IGNORE does nothing if the query already has a row
-        # (the UNIQUE constraint on `query` prevents duplicates).
         conn.execute(
             """
             INSERT OR IGNORE INTO search_history
-                (query, result_count, timestamp, is_zero_result, search_count, last_searched)
+                (query, result_count, timestamp, is_zero_result,
+                 search_count, last_searched, top_score)
             VALUES
-                (?,     ?,            ?,         ?,              1,            ?)
+                (?,     ?,            ?,         ?,
+                 1,            ?,            ?)
             """,
-            (normalised, result_count, now, is_zero, now),
+            (normalised, result_count, now, is_zero, now, score),
         )
 
-        # Step 2 — always update the mutable fields.
-        # If the INSERT above created a new row, this UPDATE is a no-op on
-        # the counters (search_count stays 1, last_searched stays `now`).
-        # If the row already existed, search_count is incremented and
-        # result_count / is_zero_result reflect the latest search outcome.
+        # Step 2 — update mutable fields on repeat searches.
+        # WHERE timestamp != ? prevents double-incrementing a freshly inserted row.
         conn.execute(
             """
             UPDATE search_history
@@ -110,15 +115,13 @@ def log_search(query: str, result_count: int) -> None:
                 search_count   = search_count + 1,
                 result_count   = ?,
                 is_zero_result = ?,
-                last_searched  = ?
+                last_searched  = ?,
+                top_score      = ?
             WHERE query = ?
               AND timestamp != ?
             """,
-            (result_count, is_zero, now, normalised, now),
+            (result_count, is_zero, now, score, normalised, now),
         )
-        # NOTE: the WHERE timestamp != ? clause prevents the UPDATE from
-        # double-incrementing search_count on a freshly inserted row.
-        # A new row has timestamp == now, so the UPDATE condition is false.
 
         conn.commit()
     except Exception as exc:
@@ -136,7 +139,7 @@ def get_recent_searches(limit: int = 10) -> List[Dict]:
     -------
     list of dicts:
         id, query, result_count, timestamp, is_zero_result,
-        search_count, last_searched
+        search_count, last_searched, top_score
     """
     limit = min(max(1, limit), 100)
     conn = get_connection()
@@ -144,7 +147,7 @@ def get_recent_searches(limit: int = 10) -> List[Dict]:
         rows = conn.execute(
             """
             SELECT id, query, result_count, timestamp,
-                   is_zero_result, search_count, last_searched
+                   is_zero_result, search_count, last_searched, top_score
             FROM search_history
             ORDER BY last_searched DESC
             LIMIT ?

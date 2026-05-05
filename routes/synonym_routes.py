@@ -1,19 +1,23 @@
 """
 routes/synonym_routes.py
 ------------------------
-CRUD API for the synonyms table.
+CRUD API for the synonyms table + admin approval flow for suggestions.
 
 Endpoints
 ---------
-  GET    /api/synonyms          — list all synonyms
-  POST   /api/synonyms/add      — add a new synonym pair
-  DELETE /api/synonyms/<id>     — delete a synonym by id
+  GET    /api/synonyms                    — list all active synonyms
+  POST   /api/synonyms/add               — add a new synonym pair manually
+  DELETE /api/synonyms/<id>              — delete an active synonym
 
-After every mutation (add / delete), reload_synonyms() is called so the
-change takes effect immediately in apply_synonyms() — no server restart needed.
+  POST   /api/synonyms/suggest           — run the suggester (generate candidates)
+  GET    /api/synonyms/suggestions       — list pending suggestions
+  GET    /api/synonyms/suggestions/all   — list all suggestions (any status)
+  POST   /api/synonyms/approve/<id>      — approve → move to synonyms table
+  POST   /api/synonyms/reject/<id>       — reject a suggestion
 
-The search cache is also cleared after each mutation so cached results that
-were computed with the old synonym set are not served.
+After every mutation that changes the active synonyms table, reload_synonyms()
+is called so the change takes effect immediately in apply_synonyms() — no
+server restart needed.  The search cache is also cleared.
 """
 
 from datetime import datetime, timezone
@@ -22,6 +26,13 @@ from flask import Blueprint, request, jsonify
 from db.database import get_connection
 from modules.fuzzy_search import reload_synonyms
 from modules.cache import search_cache
+from modules.synonym_suggester import (
+    generate_suggestions,
+    get_pending_suggestions,
+    get_all_suggestions,
+    approve_suggestion,
+    reject_suggestion,
+)
 
 synonym_bp = Blueprint("synonyms", __name__)
 
@@ -167,3 +178,136 @@ def api_delete_synonym(synonym_id: int):
         "deleted_variant": deleted["variant"],
         "synonyms_loaded": count,
     })
+
+
+# ── POST /api/synonyms/suggest ─────────────────────────────────────────────────
+
+@synonym_bp.route("/api/synonyms/suggest", methods=["POST"])
+def api_run_suggester():
+    """
+    POST /api/synonyms/suggest
+    Body (JSON, optional): { "max_suggestions": 50 }
+
+    Runs the synonym suggester:
+      1. Extracts keywords from the current product catalog
+      2. Finds weak queries in search_history (zero / low results)
+      3. Matches them against keywords using RapidFuzz (score 60–85)
+      4. Stores candidates in synonym_suggestions with status='pending'
+
+    This is a synchronous call — it may take a few seconds on large catalogs.
+    For 40k products and 200 queries it typically completes in < 2 seconds.
+
+    Response (200)
+    --------------
+    {
+      "status": "ok",
+      "new_suggestions": 7,
+      "suggestions": [
+        { "variant": "grdiner", "canonical": "grinder", "score": 85.7 },
+        ...
+      ]
+    }
+    """
+    body = request.get_json(silent=True) or {}
+    max_s = min(max(1, int(body.get("max_suggestions", 50))), 200)
+
+    suggestions = generate_suggestions(max_suggestions=max_s)
+
+    return jsonify({
+        "status":          "ok",
+        "new_suggestions": len(suggestions),
+        "suggestions":     suggestions,
+    })
+
+
+# ── GET /api/synonyms/suggestions ─────────────────────────────────────────────
+
+@synonym_bp.route("/api/synonyms/suggestions", methods=["GET"])
+def api_list_suggestions():
+    """
+    GET /api/synonyms/suggestions?limit=100
+    Returns pending synonym suggestions, highest score first.
+
+    Response
+    --------
+    [
+      { "id": 1, "variant": "grdiner", "canonical": "grinder",
+        "score": 85.7, "status": "pending", "created_at": "..." },
+      ...
+    ]
+    """
+    limit = min(max(1, int(request.args.get("limit", 100))), 500)
+    return jsonify(get_pending_suggestions(limit=limit))
+
+
+# ── GET /api/synonyms/suggestions/all ─────────────────────────────────────────
+
+@synonym_bp.route("/api/synonyms/suggestions/all", methods=["GET"])
+def api_list_all_suggestions():
+    """
+    GET /api/synonyms/suggestions/all?limit=200
+    Returns all suggestions regardless of status, newest first.
+    Useful for auditing what the suggester has produced over time.
+    """
+    limit = min(max(1, int(request.args.get("limit", 200))), 500)
+    return jsonify(get_all_suggestions(limit=limit))
+
+
+# ── POST /api/synonyms/approve/<id> ───────────────────────────────────────────
+
+@synonym_bp.route("/api/synonyms/approve/<int:suggestion_id>", methods=["POST"])
+def api_approve_suggestion(suggestion_id: int):
+    """
+    POST /api/synonyms/approve/<id>
+
+    Approves a pending suggestion:
+      1. Validates no duplicate / circular mapping
+      2. Inserts into synonyms table
+      3. Marks suggestion as 'approved'
+      4. Hot-reloads synonyms into memory
+      5. Clears search cache
+
+    The synonym is active immediately — no server restart needed.
+
+    Response (200)
+    --------------
+    { "status": "ok", "variant": "grdiner", "canonical": "grinder",
+      "synonyms_loaded": 25 }
+
+    Response (404 / 409)
+    --------------------
+    { "error": "..." }
+    """
+    result = approve_suggestion(suggestion_id)
+
+    if "error" in result:
+        return jsonify(result), result.pop("code", 400)
+
+    # Hot-reload + cache clear
+    count = reload_synonyms()
+    search_cache.clear()
+
+    result["synonyms_loaded"] = count
+    return jsonify(result)
+
+
+# ── POST /api/synonyms/reject/<id> ────────────────────────────────────────────
+
+@synonym_bp.route("/api/synonyms/reject/<int:suggestion_id>", methods=["POST"])
+def api_reject_suggestion(suggestion_id: int):
+    """
+    POST /api/synonyms/reject/<id>
+
+    Marks a pending suggestion as 'rejected'.
+    Does NOT modify the synonyms table or reload memory.
+
+    Response (200)
+    --------------
+    { "status": "ok", "rejected_id": 1, "variant": "grdiner" }
+    """
+    result = reject_suggestion(suggestion_id)
+
+    if "error" in result:
+        return jsonify(result), result.pop("code", 400)
+
+    return jsonify(result)
