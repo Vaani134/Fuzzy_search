@@ -4,7 +4,8 @@ modules/fuzzy_search.py
 Core fuzzy search engine with:
   - 3-algorithm blend (token_set_ratio, WRatio, partial_ratio)
   - Synonym normalisation before scoring
-  - Score boosting (exact match, startswith)
+  - Score boosting (exact match, startswith, substring)
+  - Relevance-first composite ranking
   - In-memory product index rebuilt from SQLite
   - Optional background auto-rebuild thread
 
@@ -18,6 +19,22 @@ Boosting rules (applied on top of blend score, capped at 100)
 --------------------------------------------------------------
   Exact match (normalised)   → +20
   Starts-with match          → +10
+  Substring match (raw name) → +10
+
+Composite ranking formula — relevance-first
+-------------------------------------------
+  Fuzzy threshold gate: products with fuzzy_score < 70 are excluded entirely.
+
+  Tie band (fuzzy gap ≤ 10 points):
+    final = 0.85 × fuzzy + 0.10 × popularity + 0.05 × click_rate
+
+  Clear winner (fuzzy gap > 10 points):
+    final = fuzzy   (popularity and clicks ignored)
+
+  This ensures:
+  • Irrelevant products never appear regardless of popularity
+  • Clearly more relevant products always rank above less relevant ones
+  • Popularity/clicks only break ties between equally relevant products
 """
 
 import re
@@ -410,21 +427,26 @@ def get_query_suggestion(
     return pool[idx]
 
 
-def apply_boost(base_score: float, query_n: str, product_name_n: str) -> float:
+def apply_boost(base_score: float, query_n: str, product_name_n: str, raw_product_name: str = "") -> float:
     """
-    Apply deterministic boosting rules on top of the blend score.
+    Apply deterministic text-match boosting rules on top of the blend score.
 
     Rules (applied in order, cumulative):
       +20  exact match on normalised product name
       +10  product name starts with the query
+      +10  query appears as a substring in the raw product name (case-insensitive)
+           — catches "hookah" inside "China Hookah Small" without exact/prefix match
 
     The final score is capped at 100.
+    This is the FUZZY component only — composite ranking is applied separately
+    in _composite_score() after all three signals are available.
 
     Parameters
     ----------
-    base_score     : blend score (0–100)
-    query_n        : normalised query string
-    product_name_n : normalised product name
+    base_score       : blend score (0–100)
+    query_n          : normalised query string
+    product_name_n   : normalised product name
+    raw_product_name : original (un-normalised) product name for substring check
     """
     boost = 0.0
 
@@ -433,8 +455,81 @@ def apply_boost(base_score: float, query_n: str, product_name_n: str) -> float:
             boost += 20.0
         elif product_name_n.startswith(query_n):
             boost += 10.0
+        # Exact substring match in raw name — rewards products that literally
+        # contain the query word (e.g. "hookah" in "China Hookah Small")
+        elif raw_product_name and query_n in raw_product_name.lower():
+            boost += 10.0
 
     return min(base_score + boost, 100.0)
+
+
+# ── Ranking constants ──────────────────────────────────────────────────────────
+
+# Minimum fuzzy score a product must achieve to appear in results.
+# Products below this threshold are irrelevant to the query and excluded
+# before the composite formula is applied.
+# 70 is the "high match" boundary — below it the match is speculative.
+FUZZY_MIN_THRESHOLD: float = 70.0
+
+# When two products' fuzzy scores differ by more than this, the higher-fuzzy
+# product wins outright — popularity and clicks are ignored.
+# This prevents a popular-but-less-relevant product from overtaking a clearly
+# better match.  10 points is roughly the difference between "hookah pipe"
+# (exact word match) and "hookah charcoal" (same word, different product).
+FUZZY_TIE_BAND: float = 10.0
+
+
+def _composite_score(
+    fuzzy: float,
+    popularity: float,
+    click_rate: float,
+    best_fuzzy_in_results: float = 0.0,
+) -> float:
+    """
+    Combine three normalised signals (each 0–100) into a single ranking score.
+
+    Relevance-first design
+    ----------------------
+    Popularity and click signals are only applied when the fuzzy score is
+    within FUZZY_TIE_BAND (10 points) of the best fuzzy score in the result
+    set.  When a product's fuzzy score is clearly lower than the best match,
+    it ranks on fuzzy alone — popularity cannot rescue an irrelevant result.
+
+    Formula (tie band — fuzzy scores are close)
+    -------------------------------------------
+    final = 0.85 × fuzzy + 0.10 × popularity + 0.05 × click_rate
+
+    Formula (clear winner — fuzzy gap > FUZZY_TIE_BAND)
+    ----------------------------------------------------
+    final = fuzzy   (popularity and click signals ignored)
+
+    Weight rationale
+    ----------------
+    0.85  fuzzy_score  — relevance is the dominant signal.  Raised from 0.7
+                         to ensure a clearly more relevant product always wins.
+    0.10  popularity   — secondary tie-breaker.  Reduced from 0.2 so it cannot
+                         override a 10-point fuzzy advantage.
+    0.05  click_rate   — tertiary tie-breaker.  Reduced from 0.1.
+
+    Parameters
+    ----------
+    fuzzy                  : boosted fuzzy blend score for this product (0–100)
+    popularity             : normalised sales-volume score (0–100)
+    click_rate             : normalised click-count score (0–100)
+    best_fuzzy_in_results  : highest fuzzy score across all candidates in this
+                             search.  Used to determine whether this product is
+                             in the tie band or clearly behind.
+    """
+    gap = best_fuzzy_in_results - fuzzy
+
+    if gap > FUZZY_TIE_BAND:
+        # This product is clearly less relevant than the best match.
+        # Popularity and clicks cannot rescue it — rank on fuzzy alone.
+        return min(round(fuzzy, 2), 100.0)
+
+    # Products within the tie band: apply the full composite formula.
+    raw = 0.85 * fuzzy + 0.10 * popularity + 0.05 * click_rate
+    return min(round(raw, 2), 100.0)
 
 
 # ── Main engine ────────────────────────────────────────────────────────────────
@@ -485,8 +580,12 @@ class FuzzySearchEngine:
 
     def _load_products_from_db(self) -> List[Dict[str, Any]]:
         """
-        Load products from SQLite, joining brand and category names.
-        Only active, for-sale products are loaded.
+        Load products from SQLite, joining brand, category names, and
+        pre-aggregated ranking signals (popularity, click_count).
+
+        popularity  = number of transaction sell lines for this product
+                      (proxy for historical sales volume)
+        click_count = cumulative click-throughs from product_clicks table
         """
         conn = get_connection()
         try:
@@ -514,14 +613,25 @@ class FuzzySearchEngine:
                     p.product_group_id,
                     p.group_variation_name,
                     p.category_id,
-                    COALESCE(b.name, '')  AS brand_name,
-                    COALESCE(c.name, '')  AS category_name,
-                    COALESCE(pg.name, '') AS group_name
+                    COALESCE(b.name,  '')  AS brand_name,
+                    COALESCE(c.name,  '')  AS category_name,
+                    COALESCE(pg.name, '')  AS group_name,
+                    -- popularity: count of sell lines (real sales signal)
+                    COALESCE(sl.sell_count, 0) AS popularity_raw,
+                    -- click_rate: cumulative click-throughs
+                    COALESCE(pc.click_count, 0) AS click_count_raw
                 FROM products p
-                LEFT JOIN brands       b  ON b.id  = p.brand_id
-                LEFT JOIN categories   c  ON c.id  = p.category_id
+                LEFT JOIN brands        b  ON b.id  = p.brand_id
+                LEFT JOIN categories    c  ON c.id  = p.category_id
                 LEFT JOIN product_group pg ON pg.id = p.product_group_id
-                WHERE p.is_inactive    = 0
+                -- aggregate sell lines per product (subquery avoids row explosion)
+                LEFT JOIN (
+                    SELECT product_id, COUNT(*) AS sell_count
+                    FROM transaction_sell_lines
+                    GROUP BY product_id
+                ) sl ON sl.product_id = p.id
+                LEFT JOIN product_clicks pc ON pc.product_id = p.id
+                WHERE p.is_inactive = 0
                 ORDER BY p.id
                 """
             ).fetchall()
@@ -529,15 +639,47 @@ class FuzzySearchEngine:
         finally:
             conn.close()
 
+    @staticmethod
+    def _normalise_signal(values: List[float]) -> List[float]:
+        """
+        Min-max normalise a list of raw signal values to the 0–100 range.
+
+        Products with no signal (value = 0) stay at 0.
+        The product with the highest raw value gets 100.
+        All others are scaled linearly between 0 and 100.
+
+        This ensures popularity and click_rate are on the same scale as
+        fuzzy_score before the composite formula is applied.
+        """
+        if not values:
+            return values
+        max_val = max(values)
+        if max_val == 0:
+            return [0.0] * len(values)
+        return [round((v / max_val) * 100.0, 4) for v in values]
+
     def rebuild(self) -> int:
         """
         Reload products from SQLite and rebuild the in-memory index.
+        Also normalises popularity and click_rate signals to 0–100.
         Thread-safe.  Returns number of products indexed.
         """
         items = self._load_products_from_db()
 
         raw_strings        = []
         normalized_strings = []
+
+        # Extract raw signals for normalisation
+        pop_raw   = [float(item.get("popularity_raw",  0) or 0) for item in items]
+        click_raw = [float(item.get("click_count_raw", 0) or 0) for item in items]
+
+        pop_norm   = self._normalise_signal(pop_raw)
+        click_norm = self._normalise_signal(click_raw)
+
+        # Embed normalised signals back into each item dict
+        for i, item in enumerate(items):
+            item["_popularity"]  = pop_norm[i]
+            item["_click_rate"]  = click_norm[i]
 
         for item in items:
             parts = [str(item.get(f, '') or '') for f in self.text_fields]
@@ -648,27 +790,66 @@ class FuzzySearchEngine:
             limit=top_k * 2,
         )
 
-        # Pass 2 — full 3-way blend re-score + boosting
+        # Pass 2 — full 3-way blend re-score + boosting + composite ranking
         results = []
         seen    = set()
+
+        # ── First pass: score all candidates, collect fuzzy scores ────────────
+        # We need the best fuzzy score across all candidates BEFORE computing
+        # composite scores, so that _composite_score() can determine whether
+        # each product is in the tie band or clearly behind.
+        candidates = []
 
         for _text, _fast_score, index in fast_matches:
             if index in seen:
                 continue
             seen.add(index)
 
+            # ── Fuzzy component ───────────────────────────────────────────────
             base_score = blend_score(query_n, f_norm_strs[index], f_raw_strs[index])
-            if base_score < self.min_score:
+
+            # Gate: discard products below the minimum fuzzy threshold.
+            # This prevents irrelevant-but-popular products from appearing.
+            # FUZZY_MIN_THRESHOLD (70) is the "high match" boundary — below it
+            # the match is speculative and should not be shown.
+            if base_score < FUZZY_MIN_THRESHOLD:
                 continue
 
-            # Apply boosting based on product name
-            product_name_n = normalize(f_items[index].get("name", ""))
-            final_score    = apply_boost(base_score, query_n, product_name_n)
+            # Text-match boost (exact / prefix / substring)
+            product_name_n   = normalize(f_items[index].get("name", ""))
+            raw_product_name = f_items[index].get("name", "")
+            fuzzy_score      = apply_boost(
+                base_score, query_n, product_name_n, raw_product_name
+            )
+
+            candidates.append((index, fuzzy_score))
+
+        if not candidates:
+            return []
+
+        # Best fuzzy score across all surviving candidates
+        best_fuzzy = max(fs for _, fs in candidates)
+
+        # ── Second pass: apply composite formula with tie-band logic ──────────
+        for index, fuzzy_score in candidates:
+            popularity = f_items[index].get("_popularity", 0.0)
+            click_rate = f_items[index].get("_click_rate", 0.0)
+
+            # Composite score — popularity/clicks only influence within tie band
+            final_score = _composite_score(
+                fuzzy_score, popularity, click_rate,
+                best_fuzzy_in_results=best_fuzzy,
+            )
 
             result = dict(f_items[index])
-            result["score"]       = round(final_score, 2)
-            result["score_pct"]   = round(final_score, 2)
+            # ── Preserved fields (existing callers unchanged) ─────────────────
+            result["score"]       = final_score
+            result["score_pct"]   = final_score
             result["score_label"] = self._label(final_score)
+            # ── Transparency fields ───────────────────────────────────────────
+            result["fuzzy_score"]      = round(fuzzy_score, 2)
+            result["popularity_score"] = round(popularity,  2)
+            result["click_score"]      = round(click_rate,  2)
             results.append(result)
 
         results.sort(key=lambda x: x["score"], reverse=True)

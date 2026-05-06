@@ -178,5 +178,15 @@
       btn.classList.replace("btn-outline-primary", "btn-success");
     }
   }
+
+  // ── Click tracking ─────────────────────────────────────────────────────────
+  // Fire-and-forget POST to record this product view.
+  // Updates click_count in product_clicks, which feeds the ranking formula:
+  //   final_score = 0.7 × fuzzy + 0.2 × popularity + 0.1 × click_rate
+  // Errors are silently ignored — tracking must never break the page.
+  (function () {
+    const pid = {{ product.id | tojson }};
+    fetch(`/api/product/${pid}/click`, { method: "POST" }).catch(() => {});
+  })();
 </script>
 {% endblock %}

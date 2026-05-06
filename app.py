@@ -11,22 +11,38 @@ Routes
   GET  /sync                    — sync management page
   GET  /settings                — database settings page
 
-  -- Search API (registered via Blueprint in routes/search_routes.py) --
+  -- Search API (routes/search_routes.py) --
   GET  /api/search              — paginated, filtered, sorted fuzzy search
-  GET  /api/search/history      — recent search queries
+  GET  /api/search/history      — recent search queries (with top_score)
   GET  /api/search/top          — most-frequent queries
-  POST /api/search/rebuild      — rebuild in-memory index
+  GET  /api/search/zero-results — queries that returned no results
+  GET  /api/search/trending     — trending queries (last N hours)
+  POST /api/search/rebuild      — rebuild in-memory index + clear cache
   GET  /api/autocomplete        — autocomplete suggestions
-  GET  /api/cache/stats         — cache statistics
+  GET  /api/cache/stats         — cache statistics (backend: redis|memory)
   POST /api/cache/clear         — clear search cache
+
+  -- Synonym management (routes/synonym_routes.py) --
+  GET    /api/synonyms                  — list all active synonyms
+  POST   /api/synonyms/add             — add a synonym pair manually
+  DELETE /api/synonyms/<id>            — delete an active synonym
+  POST   /api/synonyms/suggest         — run AI synonym suggester
+  GET    /api/synonyms/suggestions     — list pending suggestions
+  GET    /api/synonyms/suggestions/all — list all suggestions (any status)
+  POST   /api/synonyms/approve/<id>    — approve → live immediately
+  POST   /api/synonyms/reject/<id>     — reject a suggestion
+
+  -- Image search (routes/image_search_routes.py) --
+  POST /api/image-search        — search by uploaded image
 
   -- Other API --
   GET  /api/product/<id>        — product detail JSON
+  POST /api/product/<id>/click  — record a click-through (updates ranking)
   POST /api/sync                — trigger MySQL → SQLite sync
   GET  /api/sync/live           — real-time sync progress
   GET  /api/sync/history        — sync log history
   GET  /api/sync/status         — latest sync status per table
-  GET  /api/stats               — engine and DB stats
+  GET  /api/stats               — engine, DB, and cache stats
   POST /api/download-zip        — download product images as ZIP
   GET  /api/settings            — get DB settings (password masked)
   POST /api/settings            — save DB settings
@@ -374,6 +390,65 @@ def api_product(product_id: int):
     return jsonify(dict_from_row(row))
 
 
+@app.route("/api/product/<int:product_id>/click", methods=["POST"])
+def api_product_click(product_id: int):
+    """
+    POST /api/product/<id>/click
+
+    Record a click-through on a product from search results.
+    Increments the click_count in product_clicks and updates updated_at.
+
+    Uses INSERT OR REPLACE (upsert) so the first click creates the row
+    and subsequent clicks increment the counter atomically.
+
+    Called automatically by the frontend when a user opens a product
+    detail page from the search results grid.
+
+    Response
+    --------
+    { "status": "ok", "product_id": 101, "click_count": 5 }
+    """
+    from datetime import timezone as _tz
+    now = datetime.now(_tz.utc).isoformat()
+
+    conn = get_connection()
+    try:
+        # Verify the product exists
+        exists = conn.execute(
+            "SELECT id FROM products WHERE id = ? AND is_inactive = 0",
+            (product_id,),
+        ).fetchone()
+        if not exists:
+            return jsonify({"error": "Product not found"}), 404
+
+        # Upsert: insert on first click, increment on subsequent clicks
+        conn.execute(
+            """
+            INSERT INTO product_clicks (product_id, click_count, updated_at)
+            VALUES (?, 1, ?)
+            ON CONFLICT(product_id) DO UPDATE SET
+                click_count = click_count + 1,
+                updated_at  = excluded.updated_at
+            """,
+            (product_id, now),
+        )
+        conn.commit()
+
+        new_count = conn.execute(
+            "SELECT click_count FROM product_clicks WHERE product_id = ?",
+            (product_id,),
+        ).fetchone()["click_count"]
+
+    finally:
+        conn.close()
+
+    return jsonify({
+        "status":     "ok",
+        "product_id": product_id,
+        "click_count": new_count,
+    })
+
+
 @app.route("/api/sync", methods=["POST"])
 def api_sync():
     """
@@ -454,7 +529,7 @@ def api_stats():
         "db_brands":      brand_count,
         "db_categories":  category_count,
         "total_searches": search_count,
-        "cache":          _cache.stats(),
+        "cache":          {**_cache.stats(), "backend": _cache.backend_name},
     })
 
 

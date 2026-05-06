@@ -143,6 +143,22 @@ def _run_migrations() -> None:
         )
         conn.commit()
 
+        # ── Migration 6: product_clicks table (added in v7) ───────────────────
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_clicks (
+                product_id  INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+                click_count INTEGER NOT NULL DEFAULT 0,
+                updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_product_clicks_count "
+            "ON product_clicks(click_count)"
+        )
+        conn.commit()
+
     except Exception as exc:
         print(f"[DB] Migration warning: {exc}")
     finally:

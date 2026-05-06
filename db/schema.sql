@@ -245,3 +245,21 @@ CREATE TABLE IF NOT EXISTS synonym_suggestions (
 CREATE INDEX IF NOT EXISTS idx_syn_sug_status    ON synonym_suggestions(status);
 CREATE INDEX IF NOT EXISTS idx_syn_sug_variant   ON synonym_suggestions(variant);
 CREATE INDEX IF NOT EXISTS idx_syn_sug_score     ON synonym_suggestions(score);
+
+-- ─── product_clicks (tracks user click-throughs on search results) ────────────
+--
+-- Incremented via POST /api/product/<id>/click whenever a user opens a
+-- product detail page from search results.  Used as the click_rate signal
+-- in the composite ranking formula:
+--
+--   final_score = 0.7 * fuzzy_score + 0.2 * popularity + 0.1 * click_rate
+--
+-- click_count : raw cumulative click count (never decremented)
+-- updated_at  : timestamp of the most recent click (for decay if needed later)
+CREATE TABLE IF NOT EXISTS product_clicks (
+    product_id  INTEGER PRIMARY KEY REFERENCES products(id) ON DELETE CASCADE,
+    click_count INTEGER NOT NULL DEFAULT 0,
+    updated_at  TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_clicks_count ON product_clicks(click_count);
