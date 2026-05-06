@@ -463,7 +463,118 @@ def apply_boost(base_score: float, query_n: str, product_name_n: str, raw_produc
     return min(base_score + boost, 100.0)
 
 
-# ── Ranking constants ──────────────────────────────────────────────────────────
+# ── Query expansion ───────────────────────────────────────────────────────────
+#
+# Maps a user's intent phrase to a list of concrete product keywords.
+# When a query matches a key, the engine searches for ALL the mapped terms
+# in addition to the original query, then merges the results.
+#
+# Design rules
+# ------------
+# • Keys are lowercase, stripped phrases (matched case-insensitively).
+# • Values are lists of canonical product keywords — each is searched
+#   independently and results are merged by product ID (best score wins).
+# • The original query is ALWAYS searched first; expansions are additive.
+# • Keep entries domain-specific — generic phrases produce noisy results.
+# • Add new entries freely; no code changes needed elsewhere.
+#
+# Examples
+# --------
+#   "smoking stuff"  → searches "hookah", "pipe", "cigarette", "tobacco"
+#   "vaping"         → searches "vape", "e-cigarette"
+#   "rolling"        → searches "rolling paper", "blunt wrap", "grinder"
+
+QUERY_EXPANSIONS: Dict[str, List[str]] = {
+    # ── Smoking / tobacco ─────────────────────────────────────────────────────
+    "smoking stuff":    ["hookah", "pipe", "cigarette", "tobacco", "cigar"],
+    "smoking":          ["cigarette", "tobacco", "cigar", "pipe"],
+    "smoke":            ["cigarette", "tobacco", "cigar", "pipe"],
+    "tobacco products": ["cigarette", "tobacco", "cigar", "pipe", "hookah"],
+    # ── Hookah / shisha ───────────────────────────────────────────────────────
+    "hookah stuff":     ["hookah", "charcoal", "pipe", "shisha"],
+    "shisha":           ["hookah", "charcoal", "pipe"],
+    "water pipe":       ["hookah", "bong", "bubbler"],
+    # ── Vaping ────────────────────────────────────────────────────────────────
+    "vaping":           ["vape", "e-cigarette"],
+    "vape stuff":       ["vape", "e-cigarette"],
+    "e cig":            ["e-cigarette", "vape"],
+    # ── Rolling / wrapping ────────────────────────────────────────────────────
+    "rolling":          ["rolling paper", "blunt wrap", "grinder"],
+    "roll up":          ["rolling paper", "tobacco", "filter"],
+    "blunt":            ["blunt wrap", "rolling paper"],
+    # ── Grinding ──────────────────────────────────────────────────────────────
+    "herb grinder":     ["grinder"],
+    "weed grinder":     ["grinder"],
+    # ── Accessories ───────────────────────────────────────────────────────────
+    "smoking accessories": ["lighter", "ashtray", "filter", "pipe", "grinder"],
+    "accessories":      ["lighter", "ashtray", "filter"],
+    "lighter":          ["lighter", "torch"],
+    # ── Beverages ─────────────────────────────────────────────────────────────
+    "energy":           ["energy drink"],
+    "drinks":           ["energy drink", "beverage"],
+    # ── Glass ─────────────────────────────────────────────────────────────────
+    "glass":            ["glass pipe", "bong", "bubbler"],
+    "glass pipe":       ["glass pipe", "bong"],
+    "bong":             ["bong", "bubbler", "glass pipe"],
+}
+
+
+def expand_query(query: str) -> List[str]:
+    """
+    Return a list of search terms derived from *query* via the expansion map.
+
+    The original query is always the first element so it is searched with
+    the highest priority.  Expansion terms follow in the order they appear
+    in QUERY_EXPANSIONS.
+
+    Matching is case-insensitive and checks both the full query and each
+    individual token, so "I need smoking stuff" matches "smoking stuff".
+
+    Parameters
+    ----------
+    query : str
+        Raw user input (pre-synonym-expansion).
+
+    Returns
+    -------
+    list of str
+        [original_query] if no expansion found, or
+        [original_query, term1, term2, ...] if expansion found.
+        Always deduplicated; original query is never repeated.
+
+    Examples
+    --------
+    >>> expand_query("smoking stuff")
+    ['smoking stuff', 'hookah', 'pipe', 'cigarette', 'tobacco', 'cigar']
+    >>> expand_query("hookah")
+    ['hookah']
+    >>> expand_query("VAPING")
+    ['VAPING', 'vape', 'e-cigarette']
+    """
+    q_lower = query.strip().lower()
+    if not q_lower:
+        return [query]
+
+    extra: List[str] = []
+    seen_extra: set  = set()
+
+    # Check the full query first (longest match wins naturally)
+    if q_lower in QUERY_EXPANSIONS:
+        for term in QUERY_EXPANSIONS[q_lower]:
+            if term not in seen_extra and term.lower() != q_lower:
+                seen_extra.add(term)
+                extra.append(term)
+
+    # Also check each individual token so "I need smoking stuff" still expands
+    if not extra:
+        for token in q_lower.split():
+            if token in QUERY_EXPANSIONS:
+                for term in QUERY_EXPANSIONS[token]:
+                    if term not in seen_extra and term.lower() != q_lower:
+                        seen_extra.add(term)
+                        extra.append(term)
+
+    return [query] + extra
 
 # Minimum fuzzy score a product must achieve to appear in results.
 # Products below this threshold are irrelevant to the query and excluded
@@ -719,7 +830,21 @@ class FuzzySearchEngine:
         filters: Optional[Dict] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Search products with optional pre-filtering.
+        Search products with optional pre-filtering and query expansion.
+
+        Query expansion
+        ---------------
+        Before scoring, the query is checked against QUERY_EXPANSIONS.
+        If a match is found, additional search terms are generated and each
+        is searched independently.  Results from all terms are merged by
+        product ID — each product appears at most once, keeping its best
+        score across all expansion terms.
+
+        Example: "smoking stuff" → searches ["smoking stuff", "hookah",
+        "pipe", "cigarette", "tobacco", "cigar"] and merges all results.
+
+        The original query is always searched first.  Expansion terms are
+        additive — they can only add results, never remove them.
 
         Filters applied BEFORE fuzzy scoring (on the in-memory index):
             category   : str  — exact category_name match (case-insensitive)
@@ -727,18 +852,23 @@ class FuzzySearchEngine:
             max_price  : float — maximum sales_price or srp
 
         Returns list of product dicts enriched with:
-            score       — boosted blend score 0–100
-            score_pct   — same value (for template display)
-            score_label — "high" | "medium" | "low"
+            score            — composite ranking score 0–100
+            score_pct        — same value (for template display)
+            score_label      — "high" | "medium" | "low"
+            fuzzy_score      — raw fuzzy component
+            popularity_score — normalised sales signal
+            click_score      — normalised click signal
+            expanded_from    — which query term produced this result
+                               (original query or an expansion term)
         Sorted by score descending.
         """
         top_k = min(top_k, SEARCH_MAX_K)
 
-        # Apply synonym expansion before normalising
-        expanded_query = apply_synonyms(query)
-        query_n = normalize(expanded_query)
-        if not query_n:
-            return []
+        # ── Step 1: expand the query ──────────────────────────────────────────
+        # expand_query() returns [original] + [expansion terms].
+        # apply_synonyms() is applied to each term independently so both
+        # the original and expanded terms benefit from synonym normalisation.
+        query_terms = expand_query(query)
 
         with self._lock:
             items     = self._items
@@ -748,7 +878,7 @@ class FuzzySearchEngine:
         if not items:
             return []
 
-        # ── Pre-filter: apply category / price filters on the index ───────────
+        # ── Step 2: apply category / price filters once ───────────────────────
         filters = filters or {}
         category_filter  = (filters.get("category") or "").strip().lower()
         min_price_filter = filters.get("min_price")
@@ -757,12 +887,10 @@ class FuzzySearchEngine:
         if category_filter or min_price_filter is not None or max_price_filter is not None:
             filtered_indices = []
             for i, item in enumerate(items):
-                # Category filter
                 if category_filter:
                     item_cat = (item.get("category_name") or "").lower()
                     if category_filter not in item_cat:
                         continue
-                # Price filter — use sales_price if available, else srp
                 price = item.get("sales_price") or item.get("srp")
                 if min_price_filter is not None and (price is None or price < min_price_filter):
                     continue
@@ -770,7 +898,6 @@ class FuzzySearchEngine:
                     continue
                 filtered_indices.append(i)
 
-            # Build filtered sub-lists for scoring
             f_items     = [items[i]     for i in filtered_indices]
             f_raw_strs  = [raw_strs[i]  for i in filtered_indices]
             f_norm_strs = [norm_strs[i] for i in filtered_indices]
@@ -782,77 +909,80 @@ class FuzzySearchEngine:
         if not f_items:
             return []
 
-        # Pass 1 — fast WRatio scan to get top candidates (2× top_k)
-        fast_matches = process.extract(
-            query_n,
-            f_norm_strs,
-            scorer=fuzz.WRatio,
-            limit=top_k * 2,
-        )
+        # ── Step 3: search each query term, merge by product ID ───────────────
+        # best_by_id maps product_id → best result dict seen so far.
+        # When the same product appears for multiple query terms, we keep
+        # whichever produced the higher score.
+        best_by_id: Dict[int, Dict[str, Any]] = {}
 
-        # Pass 2 — full 3-way blend re-score + boosting + composite ranking
-        results = []
-        seen    = set()
-
-        # ── First pass: score all candidates, collect fuzzy scores ────────────
-        # We need the best fuzzy score across all candidates BEFORE computing
-        # composite scores, so that _composite_score() can determine whether
-        # each product is in the tie band or clearly behind.
-        candidates = []
-
-        for _text, _fast_score, index in fast_matches:
-            if index in seen:
-                continue
-            seen.add(index)
-
-            # ── Fuzzy component ───────────────────────────────────────────────
-            base_score = blend_score(query_n, f_norm_strs[index], f_raw_strs[index])
-
-            # Gate: discard products below the minimum fuzzy threshold.
-            # This prevents irrelevant-but-popular products from appearing.
-            # FUZZY_MIN_THRESHOLD (70) is the "high match" boundary — below it
-            # the match is speculative and should not be shown.
-            if base_score < FUZZY_MIN_THRESHOLD:
+        for term in query_terms:
+            # Apply synonym expansion to this term
+            expanded_term = apply_synonyms(term)
+            query_n       = normalize(expanded_term)
+            if not query_n:
                 continue
 
-            # Text-match boost (exact / prefix / substring)
-            product_name_n   = normalize(f_items[index].get("name", ""))
-            raw_product_name = f_items[index].get("name", "")
-            fuzzy_score      = apply_boost(
-                base_score, query_n, product_name_n, raw_product_name
+            # Pass 1 — fast WRatio scan (2× top_k candidates per term)
+            fast_matches = process.extract(
+                query_n,
+                f_norm_strs,
+                scorer=fuzz.WRatio,
+                limit=top_k * 2,
             )
 
-            candidates.append((index, fuzzy_score))
+            # Pass 2 — full blend re-score + threshold gate
+            candidates = []
+            seen_idx   = set()
 
-        if not candidates:
-            return []
+            for _text, _fast_score, index in fast_matches:
+                if index in seen_idx:
+                    continue
+                seen_idx.add(index)
 
-        # Best fuzzy score across all surviving candidates
-        best_fuzzy = max(fs for _, fs in candidates)
+                base_score = blend_score(query_n, f_norm_strs[index], f_raw_strs[index])
 
-        # ── Second pass: apply composite formula with tie-band logic ──────────
-        for index, fuzzy_score in candidates:
-            popularity = f_items[index].get("_popularity", 0.0)
-            click_rate = f_items[index].get("_click_rate", 0.0)
+                # Fuzzy threshold gate — irrelevant products excluded
+                if base_score < FUZZY_MIN_THRESHOLD:
+                    continue
 
-            # Composite score — popularity/clicks only influence within tie band
-            final_score = _composite_score(
-                fuzzy_score, popularity, click_rate,
-                best_fuzzy_in_results=best_fuzzy,
-            )
+                product_name_n   = normalize(f_items[index].get("name", ""))
+                raw_product_name = f_items[index].get("name", "")
+                fuzzy_score      = apply_boost(
+                    base_score, query_n, product_name_n, raw_product_name
+                )
+                candidates.append((index, fuzzy_score))
 
-            result = dict(f_items[index])
-            # ── Preserved fields (existing callers unchanged) ─────────────────
-            result["score"]       = final_score
-            result["score_pct"]   = final_score
-            result["score_label"] = self._label(final_score)
-            # ── Transparency fields ───────────────────────────────────────────
-            result["fuzzy_score"]      = round(fuzzy_score, 2)
-            result["popularity_score"] = round(popularity,  2)
-            result["click_score"]      = round(click_rate,  2)
-            results.append(result)
+            if not candidates:
+                continue
 
-        results.sort(key=lambda x: x["score"], reverse=True)
+            best_fuzzy = max(fs for _, fs in candidates)
+
+            for index, fuzzy_score in candidates:
+                popularity = f_items[index].get("_popularity", 0.0)
+                click_rate = f_items[index].get("_click_rate", 0.0)
+
+                final_score = _composite_score(
+                    fuzzy_score, popularity, click_rate,
+                    best_fuzzy_in_results=best_fuzzy,
+                )
+
+                product_id = f_items[index]["id"]
+
+                # Keep this result only if it's better than what we have
+                if product_id not in best_by_id or final_score > best_by_id[product_id]["score"]:
+                    result = dict(f_items[index])
+                    result["score"]            = final_score
+                    result["score_pct"]        = final_score
+                    result["score_label"]      = self._label(final_score)
+                    result["fuzzy_score"]      = round(fuzzy_score, 2)
+                    result["popularity_score"] = round(popularity,  2)
+                    result["click_score"]      = round(click_rate,  2)
+                    # Track which query term produced this result
+                    result["expanded_from"]    = term if term != query else None
+                    best_by_id[product_id]     = result
+
+        # ── Step 4: sort merged results by composite score ────────────────────
+        results = sorted(best_by_id.values(), key=lambda x: x["score"], reverse=True)
         return results[:top_k]
 
     def search_with_field_scores(
