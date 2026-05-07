@@ -1,6 +1,6 @@
 # 🔍 Fuzzy Search App
 
-> A production-grade intelligent product search engine built with Flask, SQLite, and RapidFuzz — featuring typo tolerance, DB-backed synonyms, AI synonym suggestions, image search, real-time analytics, Redis caching, and background indexing.
+> A production-grade intelligent product search engine built with Flask, SQLite, and RapidFuzz — featuring typo tolerance, DB-backed synonyms, AI synonym suggestions, composite ranking, query expansion, image search, real-time analytics, Redis caching, and background indexing.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)](https://python.org)
 [![Flask](https://img.shields.io/badge/Flask-3.0.3-black?logo=flask)](https://flask.palletsprojects.com)
@@ -34,12 +34,16 @@ Whether a customer types `"hooka"` instead of `"hookah"`, `"grider"` instead of 
 | 🔤 **Synonyms** | DB-backed synonym table — add/delete via API, live without restart |
 | 🤖 **AI Suggestions** | Synonym suggester: detects weak queries → proposes corrections → admin approves |
 | 💡 **Did You Mean** | Spelling correction banner for low-confidence queries |
-| 🏆 **Ranking** | Score boosting for exact and prefix matches |
+| 🔀 **Query Expansion** | Intent-phrase mapping — "smoking stuff" → searches hookah, pipe, cigarette |
+| 🏆 **Composite Ranking** | Relevance-first: fuzzy × 0.85 + popularity × 0.10 + click_rate × 0.05 |
+| 🛡️ **Relevance Gate** | Products with fuzzy score < 70 excluded — popularity can't rescue irrelevant results |
+| 👆 **Click Tracking** | `POST /api/product/<id>/click` feeds the ranking signal in real time |
 | 📄 **Pagination** | Page / limit controls with total result counts |
 | 🔽 **Sorting** | Sort by relevance score or product name A–Z |
 | 🎯 **Filtering** | Filter by category, min price, max price |
 | ⚡ **Autocomplete** | Prefix + contains suggestions from products, brands, categories |
 | 📊 **Analytics** | Search history with top_score, trending queries, zero-result detection |
+| 📈 **Dashboard Charts** | Chart.js visualisations: top queries, zero-result queries, 24h trending |
 | 🗄️ **Caching** | Redis cache with automatic in-memory fallback (60s TTL) |
 | 🖼️ **Image Search** | Upload an image → extract labels → fuzzy search (MobileNet or heuristic) |
 | 🔄 **Sync** | MySQL → SQLite sync with cursor-based pagination (handles 488k+ rows) |
@@ -61,6 +65,12 @@ User Query (text or image)
     │               ▼ query_generated = "hookah pipe"
     │
     ▼
+┌─────────────────────────────┐
+│  Query Expansion            │  "smoking stuff" → ["hookah","pipe","cigarette"]
+│  expand_query(query)        │  Original query always searched first
+└─────────────┬───────────────┘
+              │  (each expansion term goes through the pipeline below)
+              ▼
 ┌─────────────────────────────┐
 │  Synonym Expansion          │  "sheesha" → "hookah"  (DB-backed, hot-reload)
 │  apply_synonyms(query)      │  "grider"  → "grinder"
@@ -91,7 +101,29 @@ User Query (text or image)
               │
               ▼
 ┌─────────────────────────────┐
-│  Score Boosting             │  Exact match → +20 · Starts-with → +10
+│  Relevance Gate             │  fuzzy_score < 70 → EXCLUDED
+│  FUZZY_MIN_THRESHOLD = 70   │  Irrelevant products never appear
+└─────────────┬───────────────┘
+              │
+              ▼
+┌─────────────────────────────┐
+│  Score Boosting             │  Exact match  → +20
+│  apply_boost()              │  Starts-with  → +10
+│                             │  Substring    → +10  (capped at 100)
+└─────────────┬───────────────┘
+              │
+              ▼
+┌─────────────────────────────┐
+│  Composite Ranking          │  Tie band (gap ≤ 10):
+│  _composite_score()         │    0.85×fuzzy + 0.10×popularity + 0.05×click
+│                             │  Clear winner (gap > 10):
+│                             │    fuzzy only (popularity ignored)
+└─────────────┬───────────────┘
+              │
+              ▼
+┌─────────────────────────────┐
+│  Merge (multi-term)         │  Results from all expansion terms merged
+│  best score per product     │  by product ID — each product appears once
 └─────────────┬───────────────┘
               │
               ▼
@@ -264,8 +296,8 @@ python app.py
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/search` | Paginated fuzzy search with filters, sort, suggestion |
-| `GET` | `/api/search/history` | Recent queries with top_score |
+| `GET` | `/api/search` | Paginated fuzzy search with filters, sort, suggestion, expansion |
+| `GET` | `/api/search/history` | Recent queries with top_score, search_count |
 | `GET` | `/api/search/top` | Most-searched queries |
 | `GET` | `/api/search/zero-results` | Queries that returned no results |
 | `GET` | `/api/search/trending` | Trending queries (last N hours) |
@@ -287,6 +319,30 @@ python app.py
 | `max_price` | — | Maximum price |
 
 **Response includes:** `query`, `expanded_query`, `suggestion` (Did You Mean), `page`, `total_results`, `total_pages`, `results[]`
+
+**Each result includes:**
+
+```json
+{
+  "id": 101,
+  "name": "China Hookah Small",
+  "score": 89.5,
+  "score_pct": 89.5,
+  "score_label": "high",
+  "fuzzy_score": 100.0,
+  "popularity_score": 60.0,
+  "click_score": 40.0,
+  "expanded_from": null
+}
+```
+
+| Field | Description |
+|---|---|
+| `score` | Final composite ranking score (0–100) |
+| `fuzzy_score` | Raw fuzzy relevance component |
+| `popularity_score` | Normalised sales-volume signal (0–100) |
+| `click_score` | Normalised click-through signal (0–100) |
+| `expanded_from` | Which expansion term found this result (`null` = original query) |
 
 ---
 
@@ -346,7 +402,8 @@ curl -X POST http://127.0.0.1:5000/api/synonyms/suggest
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/product/<id>` | Product detail JSON |
-| `GET` | `/api/stats` | Engine + DB + cache stats |
+| `POST` | `/api/product/<id>/click` | Record a click-through (feeds ranking signal) |
+| `GET` | `/api/stats` | Engine + DB + cache stats (includes `backend` field) |
 | `POST` | `/api/sync` | Trigger MySQL → SQLite sync |
 | `GET` | `/api/sync/live` | Real-time sync progress |
 | `POST` | `/api/download-zip` | Download product images as ZIP |
@@ -380,11 +437,55 @@ final = max(score_normalized, score_raw)
 
 ### Score Boosting
 
-| Rule | Boost |
-|---|---|
-| Exact match (normalized) | +20 |
-| Starts-with match | +10 |
-| Cap | 100 |
+Applied on top of the blend score before composite ranking:
+
+| Rule | Boost | Condition |
+|---|---|---|
+| Exact match | +20 | Normalized query == normalized product name |
+| Prefix match | +10 | Product name starts with the query |
+| Substring match | +10 | Query appears anywhere in the raw product name |
+| Cap | 100 | Score never exceeds 100 |
+
+### Relevance-First Composite Ranking
+
+The final score combines three signals, but **relevance always wins**:
+
+```
+Fuzzy threshold gate:  fuzzy_score < 70  →  product EXCLUDED entirely
+
+Tie band (gap ≤ 10 points between competing products):
+  final = 0.85 × fuzzy_score + 0.10 × popularity + 0.05 × click_rate
+
+Clear winner (gap > 10 points):
+  final = fuzzy_score   (popularity and clicks ignored)
+```
+
+**Why this matters:** A popular product with fuzzy score 60 cannot outrank a relevant product with fuzzy score 85. Popularity only breaks ties between equally relevant results.
+
+| Signal | Source | Weight |
+|---|---|---|
+| `fuzzy_score` | RapidFuzz blend + boost | 0.85 |
+| `popularity` | `transaction_sell_lines` count, normalised 0–100 | 0.10 |
+| `click_rate` | `product_clicks` count, normalised 0–100 | 0.05 |
+
+Signals are normalised at index rebuild time — the most-sold product gets 100, all others scale linearly. This means weights are always meaningful regardless of catalog size.
+
+### Query Expansion
+
+Before scoring, the query is checked against `QUERY_EXPANSIONS` — a domain-specific intent map:
+
+```python
+"smoking stuff"  → ["hookah", "pipe", "cigarette", "tobacco", "cigar"]
+"vaping"         → ["vape", "e-cigarette"]
+"rolling"        → ["rolling paper", "blunt wrap", "grinder"]
+```
+
+Each expansion term is searched independently. Results are merged by product ID — each product appears once, keeping its best score. The original query is always searched first; expansions are additive.
+
+```bash
+# "smoking stuff" returns hookah, pipe, cigarette, and tobacco products
+curl "http://127.0.0.1:5000/api/search?q=smoking+stuff"
+```
 
 ### DB-Backed Synonyms
 
@@ -395,15 +496,20 @@ apply_synonyms("sheesha pipe") → "hookah pipe"
 apply_synonyms("grider")       → "grinder"
 ```
 
+The regex uses word boundaries (`\b`) and a single-pass alternation to prevent double-replacement bugs (e.g. `"sheesha"` → `"hookah"` never re-matches `"hooka"` inside the result).
+
 ### AI Synonym Suggester
 
 The suggester analyses `search_history` for weak queries (`top_score < 70`) and matches them against product keywords using RapidFuzz. Candidates in the 70–88 score band are stored as `pending` suggestions for admin review.
 
-**Quality filters:**
-- `is_valid_query()` rejects garbage (too short, too many tokens, no meaningful tokens)
-- Token-level matching (not full-string) for multi-word queries
-- Circular mapping detection
+**Quality filters applied before any fuzzy work:**
+- `is_valid_query()` rejects garbage (too short, > 3 tokens, no meaningful tokens ≥ 4 chars)
+- Token-level matching (not full-string) for multi-word queries — `"glass pip"` → token `"pip"` → `"pipe"`
+- Circular mapping detection (A→B and B→A blocked)
 - No duplicate variants
+
+**Why `top_score` instead of `result_count`:**
+Fuzzy search always returns results — `"grdiner"` returns grinder products at score 62. `result_count` alone can't distinguish this from a correct query. `top_score` captures match confidence, not just result existence.
 
 ---
 
@@ -417,11 +523,26 @@ TTL       = 60 seconds
 Backend   = Redis (if REDIS_URL set) or in-memory dict (fallback)
 ```
 
-The cache backend is selected at startup and is transparent to all callers. `GET /api/cache/stats` shows `"backend": "redis"` or `"backend": "memory"`.
+The cache backend is selected at startup and is transparent to all callers. `GET /api/cache/stats` shows `"backend": "redis"` or `"backend": "memory"`. The cache is automatically invalidated after index rebuilds and MySQL syncs.
 
 ### In-Memory Index
 
 40,938 products → ~56 MB RAM. Rebuilt every 300s by a background thread. The two-pass search strategy (fast WRatio scan → full blend re-score) keeps latency under 100ms.
+
+At rebuild time, two ranking signals are loaded and normalised to 0–100:
+- **popularity** — count of `transaction_sell_lines` per product (real sales data)
+- **click_rate** — count from `product_clicks` table (incremented via `POST /api/product/<id>/click`)
+
+### Click Tracking
+
+Every product detail page view fires a fire-and-forget POST to record the click:
+
+```javascript
+// Runs automatically on product.html page load
+fetch(`/api/product/${pid}/click`, { method: "POST" }).catch(() => {});
+```
+
+The `product_clicks` table uses an upsert pattern — first click creates the row, subsequent clicks increment atomically. Click counts feed the composite ranking formula at the next index rebuild.
 
 ### MySQL Sync
 
@@ -437,44 +558,110 @@ Cursor-based pagination (`WHERE id > last_id`) instead of `LIMIT/OFFSET`. Fresh 
 |---|---|
 | `query` | Normalised query string |
 | `result_count` | Results returned |
-| `top_score` | Best result's fuzzy score (0–100) |
+| `top_score` | Best result's composite score (0–100) |
 | `is_zero_result` | 1 if no results |
 | `search_count` | Cumulative search count |
 | `last_searched` | Timestamp of most recent search |
 
 `top_score` is the key signal for the synonym suggester — it distinguishes `"grdiner"` (score 62, weak) from `"grinder"` (score 95, strong) even though both return results.
 
+### Dashboard Charts
+
+The dashboard includes three live Chart.js visualisations, each fetching data from the analytics API on page load:
+
+| Chart | API | Description |
+|---|---|---|
+| **Top Queries** | `GET /api/search/top` | Horizontal bar — most-searched terms |
+| **Zero-Result Queries** | `GET /api/search/zero-results` | Horizontal bar — catalog gaps (red) |
+| **Trending (24h)** | `GET /api/search/trending` | Vertical bar — queries searched most in the last 24 hours |
+
+Charts show empty-state messages when no data is available and display timestamps showing when data was last fetched.
+
 ---
 
 ## 🧪 Testing
 
-```bash
-# Text search
-curl "http://127.0.0.1:5000/api/search?q=hookah"
-curl "http://127.0.0.1:5000/api/search?q=hooka"          # typo
-curl "http://127.0.0.1:5000/api/search?q=sheesha"        # synonym
+### Manual API Testing
 
-# Image search
+```bash
+# ── Text search ────────────────────────────────────────────────────────────────
+curl "http://127.0.0.1:5000/api/search?q=hookah"
+curl "http://127.0.0.1:5000/api/search?q=hooka"          # typo → synonym
+curl "http://127.0.0.1:5000/api/search?q=sheesha"        # synonym expansion
+curl "http://127.0.0.1:5000/api/search?q=smoking+stuff"  # query expansion
+
+# With filters and pagination
+curl "http://127.0.0.1:5000/api/search?q=grinder&category=Grinders&min_price=5&max_price=50&page=1&limit=10"
+
+# Sort by name
+curl "http://127.0.0.1:5000/api/search?q=pipe&sort=name"
+
+# ── Image search ───────────────────────────────────────────────────────────────
 curl -X POST http://127.0.0.1:5000/api/image-search \
   -F "image=@hookah.jpg"
 
-# Synonyms
+# ── Click tracking (feeds ranking signal) ─────────────────────────────────────
+curl -X POST http://127.0.0.1:5000/api/product/101/click
+# → {"status":"ok","product_id":101,"click_count":5}
+
+# ── Synonyms ───────────────────────────────────────────────────────────────────
 curl http://127.0.0.1:5000/api/synonyms
+curl -X POST http://127.0.0.1:5000/api/synonyms/add \
+  -H "Content-Type: application/json" \
+  -d '{"variant":"marlbro","canonical":"marlboro"}'
 curl -X POST http://127.0.0.1:5000/api/synonyms/suggest
 curl http://127.0.0.1:5000/api/synonyms/suggestions
+curl -X POST http://127.0.0.1:5000/api/synonyms/approve/1
+curl -X POST http://127.0.0.1:5000/api/synonyms/reject/2
 
-# Analytics
+# ── Analytics ──────────────────────────────────────────────────────────────────
 curl "http://127.0.0.1:5000/api/search/history"
+curl "http://127.0.0.1:5000/api/search/top"
 curl "http://127.0.0.1:5000/api/search/zero-results"
 curl "http://127.0.0.1:5000/api/search/trending?hours=24"
 
-# Cache
+# ── Cache ──────────────────────────────────────────────────────────────────────
 curl "http://127.0.0.1:5000/api/cache/stats"
+# → {"backend":"memory","total_entries":8,"live_entries":6,"ttl_seconds":60}
 curl -X POST "http://127.0.0.1:5000/api/cache/clear"
 
-# Stats (shows cache backend)
+# ── Stats ──────────────────────────────────────────────────────────────────────
 curl "http://127.0.0.1:5000/api/stats"
+# → includes "cache":{"backend":"redis"|"memory",...}
+
+# ── Index rebuild ──────────────────────────────────────────────────────────────
+curl -X POST "http://127.0.0.1:5000/api/search/rebuild"
+# → {"status":"ok","indexed":40938,"cache_cleared":12}
 ```
+
+### Ranking Validation
+
+```bash
+# Verify relevance-first ranking: "hookah pipe" should rank above "hookah charcoal"
+# even if charcoal has more sales — they have the same fuzzy score so popularity
+# breaks the tie, but a clearly more relevant product always wins.
+curl "http://127.0.0.1:5000/api/search?q=hookah+pipe" | python -m json.tool
+
+# Verify fuzzy threshold: products with score < 70 should not appear
+# "Charcoal Natural" should NOT appear when searching "hookah"
+curl "http://127.0.0.1:5000/api/search?q=hookah" | python -m json.tool
+```
+
+### Edge Cases to Verify
+
+| Test | Query | Expected behavior |
+|---|---|---|
+| Typo | `hooka` | Returns hookah products (synonym) |
+| Synonym | `sheesha` | Expands to `hookah`, returns hookah products |
+| Expansion | `smoking stuff` | Returns hookah, pipe, cigarette, tobacco products |
+| Word order | `4 part grinder` | Matches `Grinder 4 Part` |
+| Partial | `glass` | Matches `10 Inch Glass Beaker 9MM` |
+| Empty query | `q=` | Returns `400 Bad Request` |
+| No results | `q=xyzxyzxyz` | Returns empty results array |
+| Price filter | `min_price=100&max_price=200` | Only products in that range |
+| Pagination | `page=999` | Clamps to last valid page |
+| Cache hit | Same query twice | Second response is instant |
+| Irrelevant popular | Popular product with low fuzzy score | Excluded by relevance gate |
 
 ---
 
@@ -482,13 +669,14 @@ curl "http://127.0.0.1:5000/api/stats"
 
 | Enhancement | Description |
 |---|---|
-| 🔐 **Authentication** | JWT-based API auth + admin login |
+| 🔐 **Authentication** | JWT-based API auth + admin login for synonym management |
 | 🐳 **Docker** | `Dockerfile` + `docker-compose.yml` with Redis service |
 | 🔎 **Semantic Search** | Sentence-transformer embeddings for intent-based queries |
-| 🤖 **AI Query Expansion** | LLM-powered query rewriting |
-| 📈 **Analytics Dashboard** | Visual charts for search trends and zero-result rates |
+| 🤖 **LLM Query Rewriting** | GPT-powered query expansion beyond the static mapping dict |
 | 🌐 **Multi-language** | Unicode normalization and non-English synonym support |
 | 🔔 **Webhooks** | Auto-rebuild index when MySQL data changes |
+| 📉 **Score Decay** | Time-decay on click signals so old clicks don't permanently boost products |
+| 🧪 **A/B Testing** | Serve different ranking weights to different users and measure CTR |
 
 ---
 
