@@ -33,6 +33,9 @@
   .sync-dot.error { background: #dc2626; }
   .sync-dot.pending { background: #d97706; }
 </style>
+
+<!-- Chart.js — loaded in <head> so canvases are ready when DOMContentLoaded fires -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -263,6 +266,68 @@
 
 </div>
 
+<!-- ── Analytics Charts row ── -->
+<div class="row g-4 mb-4" id="analytics-charts-row">
+
+  <!-- Top Queries — horizontal bar chart -->
+  <div class="col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0">
+            <i class="bi bi-bar-chart-fill text-primary me-2"></i>Top Queries
+          </h6>
+          <small class="text-muted" id="top-queries-updated"></small>
+        </div>
+        <div style="position:relative; height:220px;">
+          <canvas id="chartTopQueries"></canvas>
+        </div>
+        <p class="text-muted small text-center mt-2 mb-0" id="top-queries-empty"
+           style="display:none;">No search history yet.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Zero-Result Queries — horizontal bar chart -->
+  <div class="col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0">
+            <i class="bi bi-slash-circle text-danger me-2"></i>Zero-Result Queries
+          </h6>
+          <small class="text-muted" id="zero-queries-updated"></small>
+        </div>
+        <div style="position:relative; height:220px;">
+          <canvas id="chartZeroResults"></canvas>
+        </div>
+        <p class="text-muted small text-center mt-2 mb-0" id="zero-queries-empty"
+           style="display:none;">No zero-result queries recorded.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Trending Queries (24 h) — line chart -->
+  <div class="col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h6 class="fw-bold mb-0">
+            <i class="bi bi-graph-up-arrow text-success me-2"></i>Trending (24 h)
+          </h6>
+          <small class="text-muted" id="trending-updated"></small>
+        </div>
+        <div style="position:relative; height:220px;">
+          <canvas id="chartTrending"></canvas>
+        </div>
+        <p class="text-muted small text-center mt-2 mb-0" id="trending-empty"
+           style="display:none;">No trending data yet.</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+
 <!-- ── Bottom row: sync status + recent transactions ── -->
 <div class="row g-4">
 
@@ -433,5 +498,219 @@
   }
 
   document.getElementById("btnDashRebuild").addEventListener("click", runRebuild);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ANALYTICS CHARTS
+  // All three charts fetch data from existing API endpoints on page load.
+  // Chart.js 4 is loaded via CDN in <head>.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── Shared Chart.js defaults ───────────────────────────────────────────────
+  Chart.defaults.font.family = "'Inter', 'Segoe UI', system-ui, sans-serif";
+  Chart.defaults.font.size   = 11;
+  Chart.defaults.color       = "#64748b";
+
+  // Truncate long labels so they fit in the chart
+  function truncate(str, max) {
+    return str && str.length > max ? str.slice(0, max - 1) + "…" : (str || "");
+  }
+
+  // ── 1. Top Queries — horizontal bar chart ─────────────────────────────────
+  async function loadTopQueries() {
+    try {
+      const resp = await fetch("/api/search/top?limit=8");
+      const data = await resp.json();
+
+      const emptyEl   = document.getElementById("top-queries-empty");
+      const updatedEl = document.getElementById("top-queries-updated");
+      updatedEl.textContent = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+
+      if (!data.length) {
+        emptyEl.style.display = "block";
+        return;
+      }
+      emptyEl.style.display = "none";
+
+      const labels = data.map(d => truncate(d.query, 18));
+      const counts = data.map(d => d.search_count);
+
+      new Chart(document.getElementById("chartTopQueries"), {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [{
+            label: "Searches",
+            data:  counts,
+            backgroundColor: "rgba(37,99,235,0.75)",
+            borderColor:     "rgba(37,99,235,1)",
+            borderWidth:     1,
+            borderRadius:    4,
+          }],
+        },
+        options: {
+          indexAxis: "y",          // horizontal bars
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                // Show full query in tooltip even if label is truncated
+                title: (items) => data[items[0].dataIndex]?.query || "",
+                label: (item)  => ` ${item.raw.toLocaleString()} searches`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              beginAtZero: true,
+              grid: { color: "#f1f5f9" },
+              ticks: { precision: 0 },
+            },
+            y: {
+              grid: { display: false },
+              ticks: { font: { size: 10 } },
+            },
+          },
+        },
+      });
+    } catch (e) {
+      console.warn("[Charts] Top queries failed:", e);
+    }
+  }
+
+  // ── 2. Zero-Result Queries — horizontal bar chart ─────────────────────────
+  async function loadZeroResults() {
+    try {
+      const resp = await fetch("/api/search/zero-results?limit=8");
+      const data = await resp.json();
+
+      const emptyEl   = document.getElementById("zero-queries-empty");
+      const updatedEl = document.getElementById("zero-queries-updated");
+      updatedEl.textContent = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+
+      if (!data.length) {
+        emptyEl.style.display = "block";
+        return;
+      }
+      emptyEl.style.display = "none";
+
+      const labels = data.map(d => truncate(d.query, 18));
+      const counts = data.map(d => d.search_count);
+
+      new Chart(document.getElementById("chartZeroResults"), {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [{
+            label: "Attempts",
+            data:  counts,
+            backgroundColor: "rgba(220,38,38,0.70)",
+            borderColor:     "rgba(220,38,38,1)",
+            borderWidth:     1,
+            borderRadius:    4,
+          }],
+        },
+        options: {
+          indexAxis: "y",
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: (items) => data[items[0].dataIndex]?.query || "",
+                label: (item)  => ` ${item.raw.toLocaleString()} attempts with no results`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              beginAtZero: true,
+              grid: { color: "#f1f5f9" },
+              ticks: { precision: 0 },
+            },
+            y: {
+              grid: { display: false },
+              ticks: { font: { size: 10 } },
+            },
+          },
+        },
+      });
+    } catch (e) {
+      console.warn("[Charts] Zero results failed:", e);
+    }
+  }
+
+  // ── 3. Trending Queries (24 h) — vertical bar chart ───────────────────────
+  async function loadTrending() {
+    try {
+      const resp = await fetch("/api/search/trending?hours=24&limit=8");
+      const data = await resp.json();
+
+      const emptyEl   = document.getElementById("trending-empty");
+      const updatedEl = document.getElementById("trending-updated");
+      updatedEl.textContent = new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+
+      if (!data.length) {
+        emptyEl.style.display = "block";
+        return;
+      }
+      emptyEl.style.display = "none";
+
+      const labels = data.map(d => truncate(d.query, 12));
+      const counts = data.map(d => d.search_count);
+
+      new Chart(document.getElementById("chartTrending"), {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [{
+            label: "Searches (24 h)",
+            data:  counts,
+            backgroundColor: counts.map((_, i) =>
+              `rgba(22,163,74,${0.9 - i * 0.08})`   // gradient: brightest = most searched
+            ),
+            borderColor:  "rgba(22,163,74,1)",
+            borderWidth:  1,
+            borderRadius: 4,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: (items) => data[items[0].dataIndex]?.query || "",
+                label: (item)  => ` ${item.raw.toLocaleString()} searches in last 24 h`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: { font: { size: 10 }, maxRotation: 30 },
+            },
+            y: {
+              beginAtZero: true,
+              grid: { color: "#f1f5f9" },
+              ticks: { precision: 0 },
+            },
+          },
+        },
+      });
+    } catch (e) {
+      console.warn("[Charts] Trending failed:", e);
+    }
+  }
+
+  // ── Load all three charts on DOMContentLoaded ─────────────────────────────
+  document.addEventListener("DOMContentLoaded", () => {
+    loadTopQueries();
+    loadZeroResults();
+    loadTrending();
+  });
 </script>
 {% endblock %}
