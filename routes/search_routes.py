@@ -15,7 +15,7 @@ Endpoints
 """
 
 import math
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, render_template
 
 from modules.fuzzy_search import get_engine, apply_synonyms, get_query_suggestion
 from modules.autocomplete import get_suggestions
@@ -23,6 +23,7 @@ from modules.analytics import log_search, get_recent_searches, get_top_queries, 
     get_zero_result_queries, get_trending_queries
 from modules.cache import search_cache
 from config import SEARCH_DEFAULT_K
+from db.database import get_connection
 
 search_bp = Blueprint("search", __name__)
 
@@ -193,17 +194,36 @@ def api_search_history():
     return jsonify(get_recent_searches(limit=limit))
 
 
-# ── GET /api/search/top ────────────────────────────────────────────────────────
+@search_bp.route("/analytics")
+def analytics_page():
+    return render_template("search_analytics.html")
+
 
 @search_bp.route("/api/search/top")
 def api_search_top():
-    """
-    GET /api/search/top?limit=10
-    Returns the most frequently searched queries (by cumulative search_count).
-    """
-    limit = min(max(1, _int_param("limit", 10)), 100)
-    return jsonify(get_top_queries(limit=limit))
 
+    limit = request.args.get("limit", 10, type=int)
+
+    conn = get_connection()
+
+    rows = conn.execute(
+        """
+        SELECT
+            query,
+            SUM(search_count) AS search_count,
+            MAX(result_count) AS result_count,
+            MAX(is_zero_result) AS is_zero_result
+        FROM search_history
+        GROUP BY query
+        ORDER BY search_count DESC
+        LIMIT ?
+        """,
+        (limit,)
+    ).fetchall()
+
+    conn.close()
+
+    return jsonify([dict(row) for row in rows])
 
 # ── GET /api/search/zero-results ──────────────────────────────────────────────
 

@@ -580,7 +580,7 @@ def expand_query(query: str) -> List[str]:
 # Products below this threshold are irrelevant to the query and excluded
 # before the composite formula is applied.
 # 70 is the "high match" boundary — below it the match is speculative.
-FUZZY_MIN_THRESHOLD: float = 70.0
+FUZZY_MIN_THRESHOLD: float = 50.0
 
 # When two products' fuzzy scores differ by more than this, the higher-fuzzy
 # product wins outright — popularity and clicks are ignored.

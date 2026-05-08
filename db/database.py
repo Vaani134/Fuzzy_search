@@ -30,7 +30,11 @@ def init_db() -> None:
     Also runs any incremental migrations for existing databases
     (e.g. adding the search_history table to older installs).
     """
-    os.makedirs(os.path.dirname(SQLITE_PATH), exist_ok=True)
+    db_dir = os.path.dirname(SQLITE_PATH)
+
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
         sql = f.read()
     conn = get_connection()

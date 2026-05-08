@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}Top Searches — Fuzzy Search{% endblock %}
+
+{% block extra_head %}
+
+<style>
+  .analytics-card {
+    border: 0;
+    border-radius: 1rem;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04);
+  }
+
+  .search-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 0;
+    border-bottom: 1px solid #f1f5f9;
+  }
+
+  .search-row:last-child {
+    border-bottom: none;
+  }
+
+  .search-query {
+    font-weight: 600;
+    color: #111827;
+  }
+
+  .search-meta {
+    font-size: .85rem;
+    color: #6b7280;
+    margin-top: .15rem;
+  }
+
+  .search-count {
+    background: #eff6ff;
+    color: #2563eb;
+    padding: .35rem .7rem;
+    border-radius: 999px;
+    font-size: .8rem;
+    font-weight: 600;
+  }
+
+  .zero-result {
+    color: #dc2626;
+  }
+
+  .good-result {
+    color: #16a34a;
+  }
+
+  .empty-state {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: #9ca3af;
+  }
+</style>
+
+{% endblock %}
+
+{% block content %}
+
+<div class="container py-4">
+
+  <!-- Header -->
+
+  <div class="mb-4">
+    <h2 class="fw-bold mb-1">
+      <i class="bi bi-graph-up-arrow text-primary me-2"></i>
+      Top Searches
+    </h2>
+
+
+<p class="text-muted mb-0">
+  Most frequently searched queries from users.
+</p>
+
+
+  </div>
+
+  <!-- Card -->
+
+  <div class="card analytics-card">
+    <div class="card-body p-4">
+
+
+  <div id="search-list">
+
+    <div class="text-center py-5">
+      <div class="spinner-border text-primary"></div>
+    </div>
+
+  </div>
+
+</div>
+
+
+  </div>
+
+</div>
+
+{% endblock %}
+
+{% block extra_scripts %}
+
+<script>
+
+async function loadTopSearches() {
+
+  const container = document.getElementById("search-list");
+
+  try {
+
+    const res = await fetch("/api/search/top?limit=20");
+    const data = await res.json();
+
+    if (!data.length) {
+
+      container.innerHTML = `
+        <div class="empty-state">
+          <i class="bi bi-search fs-1 d-block mb-3"></i>
+          No search analytics available yet.
+        </div>
+      `;
+
+      return;
+    }
+
+    container.innerHTML = data.map(item => `
+
+      <div class="search-row">
+
+        <div>
+
+          <div class="search-query">
+            ${item.query}
+          </div>
+
+          <div class="search-meta">
+
+            <span class="${item.is_zero_result ? 'zero-result' : 'good-result'}">
+
+              ${item.is_zero_result
+                ? 'No results found'
+                : `${item.result_count} results returned`
+              }
+
+            </span>
+
+          </div>
+
+        </div>
+
+        <div class="search-count">
+          ${item.search_count} searches
+        </div>
+
+      </div>
+
+    `).join("");
+
+  } catch (err) {
+
+    container.innerHTML = `
+      <div class="alert alert-danger">
+        Failed to load analytics.
+      </div>
+    `;
+
+    console.error(err);
+  }
+}
+
+loadTopSearches();
+
+</script>
+
+{% endblock %}

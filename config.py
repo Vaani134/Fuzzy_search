@@ -22,7 +22,7 @@ MYSQL_CONFIG = {
 
 # ── SQLite (local cache) ───────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-SQLITE_PATH = os.getenv("SQLITE_PATH", os.path.join(BASE_DIR, "db", "local.db"))
+SQLITE_PATH = os.getenv("SQLITE_PATH") or os.path.join(BASE_DIR, "db", "local.db")
 SCHEMA_PATH = os.path.join(BASE_DIR, "db", "schema.sql")
 
 # ── Sync settings ──────────────────────────────────────────────────────────────
